@@ -9,6 +9,9 @@ pub struct AppConfig {
     pub host: String,
     pub http_port: u16,
     
+    // EKLENDİ: Versiyon Takibi
+    pub service_version: String,
+
     // Service URLs
     pub stt_grpc_url: String,
     pub dialog_grpc_url: String,
@@ -16,7 +19,6 @@ pub struct AppConfig {
 
     // Security (mTLS)
     pub grpc_tls_ca_path: String,
-    // DÜZELTME: Alan adları _service_ ekini içerecek şekilde güncellendi
     pub stream_gateway_service_cert_path: String,
     pub stream_gateway_service_key_path: String,
 }
@@ -32,6 +34,7 @@ impl AppConfig {
             .set_override_option("http_port", env::var("STREAM_GATEWAY_SERVICE_HTTP_PORT").ok())?
             
             .set_default("env", "production")?
+            .set_default("service_version", "0.2.0")? // Varsayılan versiyon
             .set_default("host", "0.0.0.0")?
             .set_default("http_port", 18030)?
             
@@ -42,7 +45,6 @@ impl AppConfig {
 
             // TLS Defaults
             .set_default("grpc_tls_ca_path", "/sentiric-certificates/certs/ca.crt")?
-            // DÜZELTME: Varsayılan değerler yeni isimlendirmeye uygun hale getirildi
             .set_default("stream_gateway_service_cert_path", "/sentiric-certificates/certs/stream-gateway-service.crt")?
             .set_default("stream_gateway_service_key_path", "/sentiric-certificates/certs/stream-gateway-service.key")?;
 

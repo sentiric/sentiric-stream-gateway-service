@@ -15,17 +15,16 @@ services:
   # STREAM GATEWAY SERVICE (Rust / WebSocket / mTLS)
   # =============================================================
   stream-gateway-service:
-    container_name: stream-gateway-service
     build:
       context: .
       dockerfile: Dockerfile
     image: ghcr.io/sentiric/stream-gateway-service:latest
     restart: always
     ports:
-      - "18030:18030" # HTTP/WebSocket Port
+      - "${STREAM_GATEWAY_SERVICE_HTTP_PORT:-18030}:${STREAM_GATEWAY_SERVICE_HTTP_PORT:-18030}"
     networks:
       sentiric-net:
-        ipv4_address: 10.88.80.3
+        ipv4_address: "${STREAM_GATEWAY_SERVICE_IPV4_ADDRESS:-10.88.80.3}"
     volumes:
       - "${CERTIFICATES_REPO_PATH:-../sentiric-certificates}:/sentiric-certificates:ro"
     env_file:

@@ -34,4 +34,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # Contracts (Git Dependency)
 [dependencies.sentiric-contracts]
 git = "https://github.com/sentiric/sentiric-contracts.git"
-tag = "v1.13.1"
+tag = "v1.13.2"

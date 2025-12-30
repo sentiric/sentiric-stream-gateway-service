@@ -18,7 +18,8 @@ async fn main() -> Result<()> {
     
     // 1. Load Config
     let config = Arc::new(AppConfig::load()?);
-    info!("🚀 Mobile Gateway Service v0.1.0 starting...");
+    // GÜNCELLEME: İsim ve Versiyon
+    info!("🚀 Stream Gateway Service v{} starting...", config.service_version);
 
     // 2. Connect to Microservices
     let clients = Arc::new(GrpcClients::connect(&config).await?);

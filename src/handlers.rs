@@ -6,7 +6,7 @@ use axum::{
 use futures::{sink::SinkExt, stream::StreamExt};
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{info, error}; // warn kaldırıldı
+use tracing::{info, error};
 use uuid::Uuid;
 use crate::clients::GrpcClients;
 
@@ -19,6 +19,8 @@ use sentiric_contracts::sentiric::{
         ConversationConfig
     },
     tts::v1::{SynthesizeStreamRequest, TextType},
+    // NOT: stream::v1 importları şimdilik kaldırıldı (unused warning için).
+    // İleride Protobuf implementation eklenince geri açılacak.
 };
 
 pub async fn ws_handler(
@@ -80,7 +82,7 @@ async fn handle_socket(socket: WebSocket, clients: Arc<GrpcClients>) {
 
     // --- 2. DIALOG LOOP (Text -> Response) ---
     let mut dialog_client = clients.dialog.clone();
-    let tts_client = clients.tts.clone(); // mut kaldırıldı
+    let tts_client = clients.tts.clone();
     
     // WS Writer Channel
     let (tx_ws_out, mut rx_ws_out) = mpsc::channel::<Message>(100);
@@ -147,7 +149,7 @@ async fn handle_socket(socket: WebSocket, clients: Arc<GrpcClients>) {
     });
 
     // --- 3. WS WRITE LOOP ---
-    // mut kaldırıldı
+    // DÜZELTME: `mut` kaldırıldı
     let write_task = tokio::spawn(async move {
         while let Some(msg) = rx_ws_out.recv().await {
             if ws_sender.send(msg).await.is_err() {
@@ -160,12 +162,12 @@ async fn handle_socket(socket: WebSocket, clients: Arc<GrpcClients>) {
     while let Some(Ok(msg)) = ws_receiver.next().await {
         match msg {
             Message::Binary(data) => {
-                // Audio Chunk -> STT
+                // Fallback: Raw Audio (Web UI)
                 let req = TranscribeStreamRequest { audio_chunk: data };
                 if tx_stt_in.send(req).await.is_err() { break; }
             },
             Message::Text(text) => {
-                // Text Message -> Dialog (Chat mode)
+                // Raw Text (Chat)
                 let req = StreamConversationRequest {
                     payload: Some(stream_conversation_request::Payload::TextInput(text)),
                 };
@@ -184,3 +186,25 @@ async fn handle_socket(socket: WebSocket, clients: Arc<GrpcClients>) {
     info!("🔌 Client Disconnected. Session: {}", session_id);
     write_task.abort();
 }
+
+// FUTURE IMPLEMENTATION: Protobuf Handler Planı
+/*
+async fn handle_protobuf_request(
+    req: StreamSessionRequest,
+    tx_stt: &mpsc::Sender<TranscribeStreamRequest>,
+    tx_dialog: &mpsc::Sender<StreamConversationRequest>
+) {
+    match req.data {
+        Some(stream_session_request::Data::AudioChunk(chunk)) => {
+            let _ = tx_stt.send(TranscribeStreamRequest { audio_chunk: chunk }).await;
+        },
+        Some(stream_session_request::Data::TextMessage(text)) => {
+            // ...
+        },
+        Some(stream_session_request::Data::Config(cfg)) => {
+            // Reconfigure session settings (language, voice etc.)
+        },
+        _ => {}
+    }
+}
+*/
