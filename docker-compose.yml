@@ -18,7 +18,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ghcr.io/sentiric/stream-gateway-service:latest
+    image: ghcr.io/sentiric/sentiric-stream-gateway-service:latest
     restart: always
     ports:
       - "${STREAM_GATEWAY_SERVICE_HTTP_PORT:-18030}:${STREAM_GATEWAY_SERVICE_HTTP_PORT:-18030}"

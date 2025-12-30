@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="tr">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -37,10 +38,30 @@
             z-index: 10;
         }
 
-        h1 { margin: 0; font-size: 1.2rem; display: flex; align-items: center; gap: 10px; }
-        .badge { font-size: 0.7rem; padding: 2px 8px; border-radius: 4px; text-transform: uppercase; }
-        .badge.online { background: #059669; color: white; }
-        .badge.offline { background: #dc2626; color: white; }
+        h1 {
+            margin: 0;
+            font-size: 1.2rem;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .badge {
+            font-size: 0.7rem;
+            padding: 2px 8px;
+            border-radius: 4px;
+            text-transform: uppercase;
+        }
+
+        .badge.online {
+            background: #059669;
+            color: white;
+        }
+
+        .badge.offline {
+            background: #dc2626;
+            color: white;
+        }
 
         /* CHAT AREA */
         #chat-container {
@@ -96,8 +117,11 @@
             align-items: center;
             justify-content: center;
         }
-        
-        canvas { width: 100%; height: 100%; }
+
+        canvas {
+            width: 100%;
+            height: 100%;
+        }
 
         .input-group {
             display: flex;
@@ -116,7 +140,9 @@
             transition: border-color 0.3s;
         }
 
-        input[type="text"]:focus { border-color: var(--accent); }
+        input[type="text"]:focus {
+            border-color: var(--accent);
+        }
 
         button {
             border: none;
@@ -152,246 +178,294 @@
             font-weight: bold;
         }
 
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-        @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.4); } 70% { box-shadow: 0 0 0 10px rgba(220, 38, 38, 0); } 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0); } }
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        @keyframes pulse {
+            0% {
+                box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.4);
+            }
+
+            70% {
+                box-shadow: 0 0 0 10px rgba(220, 38, 38, 0);
+            }
+
+            100% {
+                box-shadow: 0 0 0 0 rgba(220, 38, 38, 0);
+            }
+        }
     </style>
 </head>
+
 <body>
 
-<header>
-    <h1>
-        <span>🤖 Sentiric Assistant</span>
-    </h1>
-    <div id="connectionStatus" class="badge offline">Disconnected</div>
-</header>
+    <header>
+        <h1>
+            <span>🤖 Sentiric Assistant</span>
+        </h1>
+        <div id="connectionStatus" class="badge offline">Disconnected</div>
+    </header>
 
-<div id="chat-container">
-    <div class="message ai">
-        <span class="meta">System</span>
-        Sentiric Gateway'e hoş geldiniz. Size nasıl yardımcı olabilirim?
+    <div id="chat-container">
+        <div class="message ai">
+            <span class="meta">System</span>
+            Sentiric Gateway'e hoş geldiniz. Size nasıl yardımcı olabilirim?
+        </div>
     </div>
-</div>
 
-<div class="controls-area">
-    <div class="visualizer-container">
-        <canvas id="visualizer"></canvas>
+    <div class="controls-area">
+        <div class="visualizer-container">
+            <canvas id="visualizer"></canvas>
+        </div>
+
+        <div class="input-group">
+            <button id="micBtn" title="Bas Konuş">🎤</button>
+            <input type="text" id="textInput" placeholder="Bir mesaj yazın..." autocomplete="off">
+            <button id="sendBtn">Gönder</button>
+        </div>
     </div>
-    
-    <div class="input-group">
-        <button id="micBtn" title="Bas Konuş">🎤</button>
-        <input type="text" id="textInput" placeholder="Bir mesaj yazın..." autocomplete="off">
-        <button id="sendBtn">Gönder</button>
-    </div>
-</div>
 
-<script>
-    // --- CONFIGURATION ---
-    // Otomatik Protokol Tespiti (HTTPS ise WSS, HTTP ise WS)
-    const PROTOCOL = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const WS_URL = `${PROTOCOL}//${window.location.host}/ws`;
+    <script>
+        // --- CONFIGURATION ---
+        // Otomatik Protokol Tespiti (HTTPS ise WSS, HTTP ise WS)
+        const PROTOCOL = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const WS_URL = `${PROTOCOL}//${window.location.host}/ws`;
 
-    // --- STATE ---
-    let socket;
-    let mediaRecorder;
-    let audioContext;
-    let isRecording = false;
-    let audioQueue = [];
-    let isPlaying = false;
+        // --- STATE ---
+        let socket;
+        let mediaRecorder;
+        let audioContext;
+        let isRecording = false;
+        let audioQueue = [];
+        let isPlaying = false;
 
-    // --- DOM ELEMENTS ---
-    const statusBadge = document.getElementById('connectionStatus');
-    const chatContainer = document.getElementById('chat-container');
-    const micBtn = document.getElementById('micBtn');
-    const sendBtn = document.getElementById('sendBtn');
-    const textInput = document.getElementById('textInput');
-    const canvas = document.getElementById('visualizer');
-    const canvasCtx = canvas.getContext('2d');
+        // --- DOM ELEMENTS ---
+        const statusBadge = document.getElementById('connectionStatus');
+        const chatContainer = document.getElementById('chat-container');
+        const micBtn = document.getElementById('micBtn');
+        const sendBtn = document.getElementById('sendBtn');
+        const textInput = document.getElementById('textInput');
+        const canvas = document.getElementById('visualizer');
+        const canvasCtx = canvas.getContext('2d');
 
-    // --- INITIALIZATION ---
-    function init() {
-        connectWebSocket();
-        setupVisualizer();
-    }
+        // --- INITIALIZATION ---
+        function init() {
+            connectWebSocket();
+            setupVisualizer();
+        }
 
-    function connectWebSocket() {
-        statusBadge.textContent = "Connecting...";
-        statusBadge.className = "badge offline";
-
-        socket = new WebSocket(WS_URL);
-
-        socket.onopen = () => {
-            console.log("WebSocket Connected");
-            statusBadge.textContent = "Online";
-            statusBadge.className = "badge online";
-        };
-
-        socket.onclose = () => {
-            console.log("WebSocket Disconnected");
-            statusBadge.textContent = "Disconnected";
+        function connectWebSocket() {
+            statusBadge.textContent = "Connecting...";
             statusBadge.className = "badge offline";
-            // Auto reconnect after 3s
-            setTimeout(connectWebSocket, 3000);
-        };
 
-        socket.onerror = (error) => {
-            console.error("WebSocket Error:", error);
-            addMessage("System", "Bağlantı hatası oluştu.", "ai");
-        };
+            socket = new WebSocket(WS_URL);
 
-        socket.onmessage = async (event) => {
-            if (event.data instanceof Blob) {
-                // Binary Audio
-                handleAudioData(event.data);
-            } else {
-                // Text Data (JSON)
-                try {
-                    const msg = JSON.parse(event.data);
-                    if (msg.type === 'subtitle') {
-                        addMessage("Sentiric", msg.text, "ai");
+            socket.onopen = () => {
+                console.log("WebSocket Connected");
+                statusBadge.textContent = "Online";
+                statusBadge.className = "badge online";
+            };
+
+            socket.onclose = () => {
+                console.log("WebSocket Disconnected");
+                statusBadge.textContent = "Disconnected";
+                statusBadge.className = "badge offline";
+                // Auto reconnect after 3s
+                setTimeout(connectWebSocket, 3000);
+            };
+
+            socket.onerror = (error) => {
+                console.error("WebSocket Error:", error);
+                addMessage("System", "Bağlantı hatası oluştu.", "ai");
+            };
+
+            let currentAiMessageDiv = null; // Şu an yazılan AI mesajını tutar
+
+            socket.onmessage = async (event) => {
+                if (event.data instanceof Blob) {
+                    // Binary Audio
+                    console.log("Audio chunk received");
+                    handleAudioData(event.data);
+                } else {
+                    // Text Data (JSON)
+                    try {
+                        const msg = JSON.parse(event.data);
+                        if (msg.type === 'subtitle') {
+                            // YENİ: Stream metnini ekle
+                            appendAiText(msg.text);
+                        }
+                    } catch (e) {
+                        console.log("Raw text:", event.data);
                     }
-                } catch (e) {
-                    // Fallback for raw text
-                    console.log("Raw text received:", event.data);
                 }
-            }
-        };
-    }
-
-    // --- AUDIO HANDLING ---
-    async function handleAudioData(blob) {
-        if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        
-        // Tarayıcı politikası: Kullanıcı etkileşimi olmadan ses çalmaz.
-        if (audioContext.state === 'suspended') {
-            await audioContext.resume();
+            };
         }
 
-        const arrayBuffer = await blob.arrayBuffer();
-        const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-        
-        playAudioBuffer(audioBuffer);
-    }
-
-    function playAudioBuffer(buffer) {
-        const source = audioContext.createBufferSource();
-        source.buffer = buffer;
-        source.connect(audioContext.destination);
-        source.start(0);
-    }
-
-    // --- MICROPHONE HANDLING ---
-    micBtn.onclick = async () => {
-        if (!isRecording) {
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                startRecording(stream);
-            } catch (err) {
-                alert("Mikrofon izni gerekli: " + err.message);
-                console.error(err);
+        // Yeni mesaj veya mevcut mesajın devamı mı kontrolü
+        function appendAiText(text) {
+            if (!currentAiMessageDiv) {
+                // Yeni baloncuk yarat
+                currentAiMessageDiv = document.createElement('div');
+                currentAiMessageDiv.className = 'message ai';
+                currentAiMessageDiv.innerHTML = `<span class="meta">Sentiric</span><span class="content">${text}</span>`;
+                chatContainer.appendChild(currentAiMessageDiv);
+            } else {
+                // Mevcut baloncuğa ekle
+                const contentSpan = currentAiMessageDiv.querySelector('.content');
+                contentSpan.innerText += text; // textContent yerine innerText (HTML injection önlemi)
             }
-        } else {
-            stopRecording();
+            chatContainer.scrollTop = chatContainer.scrollHeight;
         }
-    };
 
-    function startRecording(stream) {
-        mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
-        
-        mediaRecorder.ondataavailable = (event) => {
-            if (event.data.size > 0 && socket.readyState === WebSocket.OPEN) {
-                socket.send(event.data);
+        // --- AUDIO HANDLING ---
+        async function handleAudioData(blob) {
+            if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)();
+
+            // Tarayıcı politikası: Kullanıcı etkileşimi olmadan ses çalmaz.
+            if (audioContext.state === 'suspended') {
+                await audioContext.resume();
             }
-        };
 
-        mediaRecorder.start(100); // 100ms chunks
-        isRecording = true;
-        micBtn.classList.add('recording');
-        micBtn.innerHTML = "🟥"; // Stop icon
-        visualize(stream);
-    }
+            const arrayBuffer = await blob.arrayBuffer();
+            const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
 
-    function stopRecording() {
-        if (mediaRecorder) {
-            mediaRecorder.stop();
-            mediaRecorder.stream.getTracks().forEach(track => track.stop());
+            playAudioBuffer(audioBuffer);
         }
-        isRecording = false;
-        micBtn.classList.remove('recording');
-        micBtn.innerHTML = "🎤";
-    }
 
-    // --- TEXT CHAT HANDLING ---
-    sendBtn.onclick = sendMessage;
-    textInput.onkeypress = (e) => {
-        if (e.key === 'Enter') sendMessage();
-    };
+        function playAudioBuffer(buffer) {
+            const source = audioContext.createBufferSource();
+            source.buffer = buffer;
+            source.connect(audioContext.destination);
+            source.start(0);
+        }
 
-    function sendMessage() {
-        const text = textInput.value.trim();
-        if (!text || socket.readyState !== WebSocket.OPEN) return;
-
-        // UI Update
-        addMessage("You", text, "user");
-        
-        // Send to Server
-        socket.send(text);
-        textInput.value = '';
-    }
-
-    // --- UI HELPERS ---
-    function addMessage(sender, text, type) {
-        const div = document.createElement('div');
-        div.className = `message ${type}`;
-        div.innerHTML = `<span class="meta">${sender}</span>${text}`;
-        chatContainer.appendChild(div);
-        chatContainer.scrollTop = chatContainer.scrollHeight;
-    }
-
-    // --- VISUALIZER (Simple Sine Wave) ---
-    function setupVisualizer() {
-        canvasCtx.fillStyle = '#1e293b';
-        canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
-    }
-
-    function visualize(stream) {
-        if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        const source = audioContext.createMediaStreamSource(stream);
-        const analyzer = audioContext.createAnalyser();
-        analyzer.fftSize = 256;
-        source.connect(analyzer);
-
-        const bufferLength = analyzer.frequencyBinCount;
-        const dataArray = new Uint8Array(bufferLength);
-
-        function draw() {
+        // --- MICROPHONE HANDLING ---
+        micBtn.onclick = async () => {
             if (!isRecording) {
-                canvasCtx.fillStyle = '#1e293b';
-                canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
-                return;
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    startRecording(stream);
+                } catch (err) {
+                    alert("Mikrofon izni gerekli: " + err.message);
+                    console.error(err);
+                }
+            } else {
+                stopRecording();
             }
-            requestAnimationFrame(draw);
-            analyzer.getByteFrequencyData(dataArray);
+        };
 
+        function startRecording(stream) {
+            mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
+
+            mediaRecorder.ondataavailable = (event) => {
+                if (event.data.size > 0 && socket.readyState === WebSocket.OPEN) {
+                    socket.send(event.data);
+                }
+            };
+
+            mediaRecorder.start(100); // 100ms chunks
+            isRecording = true;
+            micBtn.classList.add('recording');
+            micBtn.innerHTML = "🟥"; // Stop icon
+            visualize(stream);
+        }
+
+        function stopRecording() {
+            if (mediaRecorder) {
+                mediaRecorder.stop();
+                mediaRecorder.stream.getTracks().forEach(track => track.stop());
+            }
+            isRecording = false;
+            micBtn.classList.remove('recording');
+            micBtn.innerHTML = "🎤";
+        }
+
+        // --- TEXT CHAT HANDLING ---
+        sendBtn.onclick = sendMessage;
+        textInput.onkeypress = (e) => {
+            if (e.key === 'Enter') sendMessage();
+        };
+
+        // Kullanıcı mesaj attığında AI bağlamını sıfırla
+        function sendMessage() {
+            const text = textInput.value.trim();
+            if (!text || socket.readyState !== WebSocket.OPEN) return;
+
+            // Kullanıcı mesajı ekle
+            addMessage("You", text, "user");
+
+            // AI'ın yeni bir cevap vereceğini bildiğimiz için buffer'ı sıfırla
+            currentAiMessageDiv = null;
+
+            socket.send(text);
+            textInput.value = '';
+        }
+
+        // --- UI HELPERS ---
+        // Standart mesaj ekleme (Kullanıcı için)
+        function addMessage(sender, text, type) {
+            const div = document.createElement('div');
+            div.className = `message ${type}`;
+            div.innerHTML = `<span class="meta">${sender}</span><span class="content">${text}</span>`;
+            chatContainer.appendChild(div);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        // --- VISUALIZER (Simple Sine Wave) ---
+        function setupVisualizer() {
             canvasCtx.fillStyle = '#1e293b';
             canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
-
-            const barWidth = (canvas.width / bufferLength) * 2.5;
-            let barHeight;
-            let x = 0;
-
-            for(let i = 0; i < bufferLength; i++) {
-                barHeight = dataArray[i] / 2;
-                canvasCtx.fillStyle = `rgb(${barHeight + 100}, 50, 200)`;
-                canvasCtx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
-                x += barWidth + 1;
-            }
         }
-        draw();
-    }
 
-    // Start App
-    init();
-</script>
+        function visualize(stream) {
+            if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const source = audioContext.createMediaStreamSource(stream);
+            const analyzer = audioContext.createAnalyser();
+            analyzer.fftSize = 256;
+            source.connect(analyzer);
+
+            const bufferLength = analyzer.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
+
+            function draw() {
+                if (!isRecording) {
+                    canvasCtx.fillStyle = '#1e293b';
+                    canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
+                    return;
+                }
+                requestAnimationFrame(draw);
+                analyzer.getByteFrequencyData(dataArray);
+
+                canvasCtx.fillStyle = '#1e293b';
+                canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
+
+                const barWidth = (canvas.width / bufferLength) * 2.5;
+                let barHeight;
+                let x = 0;
+
+                for (let i = 0; i < bufferLength; i++) {
+                    barHeight = dataArray[i] / 2;
+                    canvasCtx.fillStyle = `rgb(${barHeight + 100}, 50, 200)`;
+                    canvasCtx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
+                    x += barWidth + 1;
+                }
+            }
+            draw();
+        }
+
+        // Start App
+        init();
+    </script>
 
 </body>
+
 </html>
