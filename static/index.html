@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Sentiric Mobile Gateway Test</title>
+    <style>
+        body { background: #0f172a; color: #e2e8f0; font-family: 'Segoe UI', sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+        .container { text-align: center; background: #1e293b; padding: 40px; border-radius: 20px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); width: 400px; }
+        h1 { margin-bottom: 20px; color: #38bdf8; }
+        .status { margin-bottom: 20px; font-size: 14px; color: #94a3b8; }
+        .btn { padding: 15px 30px; font-size: 18px; border-radius: 50px; border: none; cursor: pointer; transition: all 0.3s; width: 100%; font-weight: bold; }
+        #startBtn { background: #22c55e; color: white; }
+        #startBtn:hover { background: #16a34a; transform: scale(1.05); }
+        #stopBtn { background: #ef4444; color: white; display: none; }
+        #stopBtn:hover { background: #dc2626; }
+        .recording #startBtn { display: none; }
+        .recording #stopBtn { display: inline-block; }
+        .subtitle-box { margin-top: 20px; padding: 15px; background: #334155; border-radius: 10px; min-height: 50px; color: #f8fafc; font-style: italic; }
+        #chatInput { width: 100%; padding: 10px; margin-top: 15px; border-radius: 5px; border: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Sentiric Gateway</h1>
+        <div id="status" class="status">Disconnected</div>
+        
+        <div id="controls">
+            <button id="startBtn" class="btn">🎤 Start Voice Session</button>
+            <button id="stopBtn" class="btn">🛑 End Session</button>
+        </div>
+
+        <input type="text" id="chatInput" placeholder="Or type a message...">
+
+        <div id="subtitles" class="subtitle-box">Waiting for conversation...</div>
+    </div>
+
+    <script>
+        let socket;
+        let mediaRecorder;
+        let audioContext;
+        let nextStartTime = 0;
+        
+        const statusDiv = document.getElementById('status');
+        const controls = document.getElementById('controls');
+        const subtitlesDiv = document.getElementById('subtitles');
+
+        // Audio Playback Queue
+        async function playAudioChunk(arrayBuffer) {
+            if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+            const source = audioContext.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(audioContext.destination);
+            
+            const now = audioContext.currentTime;
+            const startTime = Math.max(now, nextStartTime);
+            source.start(startTime);
+            nextStartTime = startTime + audioBuffer.duration;
+        }
+
+        document.getElementById('startBtn').onclick = async () => {
+            try {
+                socket = new WebSocket(`ws://${location.host}/ws`);
+                
+                socket.onopen = async () => {
+                    statusDiv.innerText = "🟢 Connected. Getting Mic...";
+                    
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
+
+                    mediaRecorder.ondataavailable = async (event) => {
+                        if (event.data.size > 0 && socket.readyState === WebSocket.OPEN) {
+                            // Convert Blob to ArrayBuffer and send
+                            const buffer = await event.data.arrayBuffer();
+                            socket.send(buffer);
+                        }
+                    };
+
+                    mediaRecorder.start(100); // 100ms chunks
+                    statusDiv.innerText = "🔴 Live Streaming...";
+                    controls.classList.add('recording');
+                };
+
+                socket.onmessage = async (event) => {
+                    if (event.data instanceof Blob) {
+                        // Binary Audio -> Play
+                        const buffer = await event.data.arrayBuffer();
+                        playAudioChunk(buffer);
+                    } else {
+                        // Text/JSON -> Subtitle
+                        try {
+                            const msg = JSON.parse(event.data);
+                            if (msg.type === 'subtitle') {
+                                subtitlesDiv.innerText = msg.text;
+                            }
+                        } catch (e) {
+                            console.log("Raw text:", event.data);
+                        }
+                    }
+                };
+
+                socket.onclose = () => {
+                    statusDiv.innerText = "⚪ Disconnected";
+                    controls.classList.remove('recording');
+                };
+
+            } catch (err) {
+                statusDiv.innerText = "❌ Error: " + err.message;
+            }
+        };
+
+        document.getElementById('stopBtn').onclick = () => {
+            if (mediaRecorder) mediaRecorder.stop();
+            if (socket) socket.close();
+        };
+
+        // Text Chat Support
+        document.getElementById('chatInput').onkeypress = (e) => {
+            if (e.key === 'Enter' && socket && socket.readyState === WebSocket.OPEN) {
+                socket.send(e.target.value);
+                e.target.value = '';
+            }
+        };
+    </script>
+</body>
+</html>

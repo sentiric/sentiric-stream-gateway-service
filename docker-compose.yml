@@ -1,0 +1,52 @@
+name: sentiric
+
+networks:
+  sentiric-net:
+    driver: bridge
+    name: sentiric-net
+    ipam:
+      config:
+        - subnet: ${NETWORK_SUBNET:-10.88.0.0/16}
+          gateway: ${NETWORK_GATEWAY:-10.88.0.1}
+
+
+services:
+  # =============================================================
+  # STREAM GATEWAY SERVICE (Rust / WebSocket / mTLS)
+  # =============================================================
+  stream-gateway-service:
+    container_name: stream-gateway-service
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/sentiric/stream-gateway-service:latest
+    restart: always
+    ports:
+      - "18030:18030" # HTTP/WebSocket Port
+    networks:
+      sentiric-net:
+        ipv4_address: 10.88.80.3
+    volumes:
+      - "${CERTIFICATES_REPO_PATH:-../sentiric-certificates}:/sentiric-certificates:ro"
+    env_file:
+      - .env
+    environment:
+      - RUST_LOG=info,sentiric_stream_gateway=debug
+      - STREAM_GATEWAY_SERVICE_HOST=stream-gateway-service
+      
+      # Security Mapping (ÖNEMLİ: Eğer dosya adlarını değiştirmediysen burayı düzeltme)
+      # Yeni isim standardı -> Eski dosya adı (Host'ta dosya adı değişene kadar)
+      - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
+      - STREAM_GATEWAY_SERVICE_CERT_PATH=/sentiric-certificates/certs/stream-gateway-service.crt
+      - STREAM_GATEWAY_SERVICE_KEY_PATH=/sentiric-certificates/certs/stream-gateway-service.key
+      
+    healthcheck:
+      test: ["CMD", "timeout", "1s", "bash", "-c", "</dev/tcp/localhost/18030"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
