@@ -36,9 +36,7 @@ volumes:
   tts-mms-cache:
   tts-mms-history:
 
-
 services:
-
   redis:
     <<: *common-settings
     image: ghcr.io/sentiric/sentiric-redis:${TAG:-latest}
@@ -51,91 +49,14 @@ services:
     healthcheck:
       test: [ "CMD", "redis-cli", "ping" ]
 
-  llm-llama-service:
-    <<: *common-settings
-    build:
-      context: ../sentiric-llm-llama-service
-      dockerfile: Dockerfile.gpu
-    image: ghcr.io/sentiric/sentiric-llm-llama-service:latest-gpu
-    volumes:
-      - "${CERTIFICATES_REPO_PATH:-../sentiric-certificates}:/sentiric-certificates:ro"
-      - llm-llama-models:/models
-      - llm-llama-loras:/lora_adapters
-
-    environment:
-      # --- NETWORK ---
-      LLM_LLAMA_SERVICE_HOST: llm-llama-service
-      LLM_LLAMA_SERVICE_LISTEN_ADDRESS: 0.0.0.0
-      LLM_LLAMA_SERVICE_HTTP_PORT: 16070
-      LLM_LLAMA_SERVICE_GRPC_PORT: 16071
-      LLM_LLAMA_SERVICE_METRICS_PORT: 16072
-
-      # --- PERFORMANCE (ECO MODE) ---
-      NVIDIA_VISIBLE_DEVICES: all
-      # 4B model ~2.5GB tutar. 100 katman demek modelin tamamını GPU'ya yükle demektir.
-      # Context 2048 ile KV Cache ~0.4GB tutar. Toplam ~3GB VRAM harcar.
-      # Kalan 3GB VRAM, TTS ve STT servisleri için ayrılır.
-      LLM_LLAMA_SERVICE_GPU_LAYERS: 100
-      LLM_LLAMA_SERVICE_CONTEXT_SIZE: 2048
-      LLM_LLAMA_SERVICE_MAX_BATCH_SIZE: 1
-      LLM_LLAMA_SERVICE_THREADS: 4
-      LLM_LLAMA_SERVICE_DEFAULT_TEMPERATURE: 0.2
-      # --- INTELLIGENCE & ADAPTIVE LANGUAGE ---
-      LLM_LLAMA_SERVICE_DEFAULT_SYSTEM_PROMPT: |
-        Senin ismin 'Sentirik'. 
-
-        ### DAVRANIŞSAL PROTOKOLLER:
-        1. GÜLÜMSEYEN SES: Kelimelerin sıcak, yardımsever ve enerjik olsun.
-        2. EMPATİ VE PARTNERLİK: 'biz' dilini kullan.
-        3. POZİTİF DİL: "-me/-ma" eklerini ve "hayır/yapamayız" gibi kesin reddedişleri minimize et. Bunun yerine her zaman alternatif veya çözüm odaklı bir cümle kur.
-        4. L.A.S.T. YÖNTEMİ: Şikayetlerde önce dinle (onayla), durum için özür dile, çözümü sun ve teşekkür et.
-        5. AYNALAMA (MIRRORING): Kullanıcının hızına ve tonuna hafifçe uyum sağla ama profesyonelliğini koru.
-
-        ### İLETİŞİM KURALLARI:
-        - DİL: Türkiye Türkçesi.
-        - HİTAP: ismiyle hitap et (örn: " Bey", " Hanım").
-        - RAG: Sadece [BİLGİ] bloğundaki veriyi kullan. 
-        - Bilgi yoksa:  "Hemen kontrol ediyorum" diyerek nazikçe operatöre yönlendir.
-        - GÜVENLİK: Acil durumlarda vakit kaybetmeden 112'ye yönlendir.
-
-      LLM_LLAMA_SERVICE_DEFAULT_RAG_PROMPT: |
-        [BİLGİ]
-        {{rag_context}}
-        [BİLGİ SONU]
-
-        Yukarıdaki bağlamı kullanarak cevapla:
-        Soru: {{user_prompt}}
-
-      LLM_LLAMA_SERVICE_DEFAULT_RAG_PROMPT_LOW: |
-        [TALİMAT]: Cevap vermeden önce kısaca düşün. Düşüncelerini <think> etiketleri içine al.
-
-      LLM_LLAMA_SERVICE_DEFAULT_RAG_PROMPT_HIGH: |
-        [TALİMAT]: Bu karmaşık bir görev. Adım adım derinlemesine düşün. Analizini <think> etiketleri içine al.
-
-      # --- SECURITY ---
-      GRPC_TLS_CA_PATH: /sentiric-certificates/certs/ca.crt
-      LLM_LLAMA_SERVICE_CERT_PATH: /sentiric-certificates/certs/llm-llama-service-chain.crt
-      LLM_LLAMA_SERVICE_KEY_PATH: /sentiric-certificates/certs/llm-llama-service.key
-
-      # --- LOGGING ---
-      LLM_LLAMA_SERVICE_LOG_LEVEL: info
-
-    networks:
-      sentiric-net:
-        ipv4_address: 10.88.60.7
-    healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:16070/health" ]
-      interval: 10s
-      timeout: 5s
-      retries: 60
-      start_period: 30s
-
+  # --- AI SERVİSLERİ ---
+  
   stt-whisper-service:
     <<: *common-settings
+    image: ghcr.io/sentiric/sentiric-stt-whisper-service:latest-gpu
     build:
       context: ../sentiric-stt-whisper-service
       dockerfile: Dockerfile.gpu
-    image: ghcr.io/sentiric/sentiric-stt-whisper-service:latest-gpu
     volumes:
       - "${CERTIFICATES_REPO_PATH:-../sentiric-certificates}:/sentiric-certificates:ro"
       - stt-whisper-models:/models
@@ -147,56 +68,59 @@ services:
       - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
       - STT_WHISPER_SERVICE_CERT_PATH=/sentiric-certificates/certs/stt-whisper-service.crt
       - STT_WHISPER_SERVICE_KEY_PATH=/sentiric-certificates/certs/stt-whisper-service.key
-      # İhtiyaç,                                        Önerilen Dosya,               Boyut
-      # En iyi genel performans (Hızlı ve Kaliteli),    ggml-large-v3-turbo.bin,      1.62 GB  
-      # Düşük RAM'li bir bilgisayarınız varsa           ggml-large-v3-turbo-q8_0.bin  0.874 GB
-      # Düşük RAM'li bir bilgisayarınız varsa           ggml-large-v3-turbo-q5_0.bin  0.574 GB          
-      # En yüksek hassasiyet (Yavaş ama Kesin),         ggml-large-v3.bin,            3.10 GB      
-      # --------------------------------------------------
       - STT_WHISPER_SERVICE_MODEL_FILENAME=ggml-large-v3-turbo-q5_0.bin
-      # dil
-      - STT_WHISPER_SERVICE_LANGUAGE=tr
-      # 1. Log Probability: Daha sıkı yaptık (-0.6 -> -0.7)
-      - STT_WHISPER_SERVICE_LOGPROB_THRESHOLD=-0.7
-      # 2. No Speech Threshold: Sessizlik olasılığı (%90 -> %85 biraz gevşettik ki VAD yakalasın)
-      - STT_WHISPER_SERVICE_NO_SPEECH_THRESHOLD=0.85
-        # 3. [KRİTİK] VAD Eşiği (Silero):
-        # Gürültüden kaçınmak için 0.65 -> 0.75 yaptık.
       - STT_WHISPER_SERVICE_VAD_THRESHOLD=0.75
-        # 4. [KRİTİK] VAD Min Duration:
-        # 200ms (Click/Pop sesleri) yerine 500ms (En kısa "Evet" bile 400ms sürer).
-      - STT_WHISPER_SERVICE_VAD_MS_MIN_DURATION=500
-      # Konuşma bittikten sonra 400ms daha bekle ki cümle tamamlansın.
-      - STT_WHISPER_SERVICE_VAD_MS_SPEECH_PAD=400
-
     networks:
       sentiric-net:
         ipv4_address: 10.88.50.3
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:15030/health" ]
-      interval: 10s
+      interval: 30s
       timeout: 5s
-      retries: 60
-      start_period: 30s      
+      retries: 20
+
+  llm-llama-service:
+    <<: *common-settings
+    image: ghcr.io/sentiric/sentiric-llm-llama-service:latest-gpu
+    build:
+      context: ../sentiric-llm-llama-service
+      dockerfile: Dockerfile.gpu
+    volumes:
+      - "${CERTIFICATES_REPO_PATH:-../sentiric-certificates}:/sentiric-certificates:ro"
+      - llm-llama-models:/models
+      - llm-llama-loras:/lora_adapters
+    environment:
+      - LLM_LLAMA_SERVICE_HOST=llm-llama-service
+      - LLM_LLAMA_SERVICE_HTTP_PORT=16070
+      - LLM_LLAMA_SERVICE_GRPC_PORT=16071
+      - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
+      - LLM_LLAMA_SERVICE_CERT_PATH=/sentiric-certificates/certs/llm-llama-service-chain.crt
+      - LLM_LLAMA_SERVICE_KEY_PATH=/sentiric-certificates/certs/llm-llama-service.key
+      - LLM_LLAMA_SERVICE_GPU_LAYERS=100
+      - LLM_LLAMA_SERVICE_CONTEXT_SIZE=2048
+    networks:
+      sentiric-net:
+        ipv4_address: 10.88.60.7
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:16070/health" ]
+      interval: 30s
+      timeout: 5s
+      retries: 20
 
   tts-coqui-service:
     <<: *common-settings
+    image: ghcr.io/sentiric/sentiric-tts-coqui-service:latest-gpu
     build:
       context: ../sentiric-tts-coqui-service
       dockerfile: Dockerfile
-    image: ghcr.io/sentiric/sentiric-tts-coqui-service:latest-gpu
     volumes:
       - "${CERTIFICATES_REPO_PATH:-../sentiric-certificates}:/sentiric-certificates:ro"
       - "${ASSETS_REPO_PATH:-../sentiric-assets}/docs/audio/speakers:/app/speakers"
       - tts-coqui-models:/root/.local/share/tts
-      - tts-coqui-history:/app/history
-      - tts-coqui-cache:/app/cache
     environment:
-      - ENV=development
       - TTS_COQUI_SERVICE_HTTP_PORT=14030
       - TTS_COQUI_SERVICE_GRPC_PORT=14031
       - TTS_COQUI_SERVICE_DEVICE=cuda
-      - TTS_COQUI_SERVICE_LOW_RESOURCE_MODE=true
       - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
       - TTS_COQUI_SERVICE_CERT_PATH=/sentiric-certificates/certs/tts-coqui-service.crt
       - TTS_COQUI_SERVICE_KEY_PATH=/sentiric-certificates/certs/tts-coqui-service.key
@@ -205,54 +129,49 @@ services:
         ipv4_address: 10.88.40.3
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:14030/health" ]
-      interval: 10s
-      timeout: 5s
-      retries: 60
-      start_period: 30s      
+      interval: 30s
+      timeout: 10s
+      retries: 20
 
   tts-mms-service:
     <<: *common-settings
+    image: ghcr.io/sentiric/sentiric-tts-mms-service:latest-gpu
     build:
       context: ../sentiric-tts-mms-service
       dockerfile: Dockerfile
-    image: ghcr.io/sentiric/sentiric-tts-mms-service:latest-gpu
+    volumes:
+      - "${CERTIFICATES_REPO_PATH:-../sentiric-certificates}:/sentiric-certificates:ro"
+      - tts-mms-cache:/app/cache
     environment:
-      - ENV=development
       - TTS_MMS_SERVICE_HTTP_PORT=14060
       - TTS_MMS_SERVICE_GRPC_PORT=14061
-      - TTS_MMS_SERVICE_METRICS_PORT=14062
       - TTS_MMS_SERVICE_DEVICE=cuda
-      - NVIDIA_VISIBLE_DEVICES=all
-      - TTS_MMS_SERVICE_DEBUG=false
-    volumes:
-      - tts-mms-cache:/app/cache
-      - tts-mms-history:/app/history
+      - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
+      # DÜZELTME: Dosya isimleri standarda uygun hale getirildi
+      - TTS_MMS_SERVICE_CERT_PATH=/sentiric-certificates/certs/tts-mms-service.crt
+      - TTS_MMS_SERVICE_KEY_PATH=/sentiric-certificates/certs/tts-mms-service.key
     networks:
       sentiric-net:
-        ipv4_address: ${TTS_MMS_SERVICE_IPV4_ADDRESS:-10.88.40.6}
+        ipv4_address: 10.88.40.6
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:14060/health" ]
-      interval: 10s
-      timeout: 5s
-      retries: 60
-      start_period: 30s      
+      interval: 30s
+      timeout: 10s
+      retries: 20
+
+  # --- GATEWAY & LOGIC SERVİSLERİ ---
 
   llm-gateway-service:
     <<: *common-settings
+    image: ghcr.io/sentiric/sentiric-llm-gateway-service:latest
     build:
       context: ../sentiric-llm-gateway-service
       dockerfile: Dockerfile
-    image: ghcr.io/sentiric/sentiric-llm-gateway-service:latest
     volumes:
       - "${CERTIFICATES_REPO_PATH:-../sentiric-certificates}:/sentiric-certificates:ro"
     environment:
-      - LLM_GATEWAY_SERVICE_HOST=llm-gateway-service
-      - LLM_GATEWAY_SERVICE_LISTEN_ADDRESS=0.0.0.0
       - LLM_GATEWAY_SERVICE_HTTP_PORT=16020
       - LLM_GATEWAY_SERVICE_GRPC_PORT=16021
-      - LLM_GATEWAY_SERVICE_METRICS_PORT=16022
-      - ENV=production
-      - RUST_LOG=info,sentiric_llm_gateway=debug
       - LLM_LLAMA_SERVICE_GRPC_URL=https://llm-llama-service:16071
       - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
       - LLM_GATEWAY_SERVICE_CERT_PATH=/sentiric-certificates/certs/llm-gateway-service.crt
@@ -263,29 +182,22 @@ services:
     healthcheck:
       test: [ "CMD", "nc", "-z", "localhost", "16021" ]
       interval: 10s
-      timeout: 5s
-      retries: 60
-      start_period: 30s      
+      retries: 10
     depends_on:
       llm-llama-service:
         condition: service_healthy
 
   stt-gateway-service:
     <<: *common-settings
+    image: ghcr.io/sentiric/sentiric-stt-gateway-service:latest
     build:
       context: ../sentiric-stt-gateway-service
       dockerfile: Dockerfile
-    image: ghcr.io/sentiric/sentiric-stt-gateway-service:latest
     volumes:
       - "${CERTIFICATES_REPO_PATH:-../sentiric-certificates}:/sentiric-certificates:ro"
     environment:
-      - ENV=production
-      - RUST_LOG=info,sentiric_stt_gateway=debug
-      - STT_GATEWAY_SERVICE_HOST=stt-gateway-service
-      - STT_GATEWAY_SERVICE_LISTEN_ADDRESS=0.0.0.0
       - STT_GATEWAY_SERVICE_HTTP_PORT=15020
       - STT_GATEWAY_SERVICE_GRPC_PORT=15021
-      - STT_GATEWAY_SERVICE_METRICS_PORT=15022
       - STT_WHISPER_SERVICE_GRPC_URL=https://stt-whisper-service:15031
       - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
       - STT_GATEWAY_SERVICE_CERT_PATH=/sentiric-certificates/certs/stt-gateway-service.crt
@@ -296,29 +208,22 @@ services:
     healthcheck:
       test: [ "CMD", "nc", "-z", "localhost", "15021" ]
       interval: 10s
-      timeout: 5s
-      retries: 60
-      start_period: 30s      
+      retries: 10
     depends_on:
       stt-whisper-service:
         condition: service_healthy
 
   tts-gateway-service:
     <<: *common-settings
+    image: ghcr.io/sentiric/sentiric-tts-gateway-service:latest
     build:
       context: ../sentiric-tts-gateway-service
       dockerfile: Dockerfile
-    image: ghcr.io/sentiric/sentiric-tts-gateway-service:latest
     volumes:
       - "${CERTIFICATES_REPO_PATH:-../sentiric-certificates}:/sentiric-certificates:ro"
     environment:
-      - ENV=production
-      - RUST_LOG=info,sentiric_tts_gateway=debug
-      - TTS_GATEWAY_SERVICE_HOST=tts-gateway-service
-      - TTS_GATEWAY_SERVICE_LISTEN_ADDRESS=0.0.0.0
       - TTS_GATEWAY_SERVICE_HTTP_PORT=14010
       - TTS_GATEWAY_SERVICE_GRPC_PORT=14011
-      - TTS_GATEWAY_SERVICE_METRICS_PORT=14012
       - TTS_COQUI_SERVICE_URL=https://tts-coqui-service:14031
       - TTS_MMS_SERVICE_URL=https://tts-mms-service:14061
       - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
@@ -330,90 +235,72 @@ services:
     healthcheck:
       test: [ "CMD", "nc", "-z", "localhost", "14011" ]
       interval: 10s
-      timeout: 5s
-      retries: 60
-      start_period: 30s      
+      retries: 10
     depends_on:
       tts-coqui-service:
         condition: service_healthy
 
-  stream-gateway-service:
-    build:
-      context: ../sentiric-stream-gateway-service
-      dockerfile: Dockerfile
-    image: ghcr.io/sentiric/sentiric-stream-gateway-service:latest
-    volumes:
-      - "${CERTIFICATES_REPO_PATH:-../sentiric-certificates}:/sentiric-certificates:ro"
-    environment:
-      - RUST_LOG=info,sentiric_stream_gateway=debug
-      - STREAM_GATEWAY_SERVICE_HOST=stream-gateway-service
-
-      - STT_GATEWAY_GRPC_URL=https://stt-gateway-service:15021
-      - DIALOG_SERVICE_GRPC_URL=https://dialog-service:12061
-      - TTS_GATEWAY_GRPC_URL=https://tts-gateway-service:14011
-
-      - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
-      - STREAM_GATEWAY_SERVICE_CERT_PATH=/sentiric-certificates/certs/stream-gateway-service.crt
-      - STREAM_GATEWAY_SERVICE_KEY_PATH=/sentiric-certificates/certs/stream-gateway-service.key
-
-      # [YENİ] Varsayılan TTS Motoru Seçimi (mms:tur veya coqui:default)
-      - TTS_DEFAULT_VOICE_ID=coqui:default
-
-    networks:
-      sentiric-net:
-        ipv4_address: "${STREAM_GATEWAY_SERVICE_IPV4_ADDRESS:-10.88.80.3}"
-    ports:
-      - "${STREAM_GATEWAY_SERVICE_HTTP_PORT:-18030}:${STREAM_GATEWAY_SERVICE_HTTP_PORT:-18030}"
-      - "${STREAM_GATEWAY_SERVICE_METRICS_PORT:-18032}:${STREAM_GATEWAY_SERVICE_METRICS_PORT:-18032}"
-    healthcheck:
-      test: [ "CMD", "timeout", "1s", "bash", "-c", "</dev/tcp/localhost/18030" ]
-      interval: 10s
-      timeout: 5s
-      retries: 60
-      start_period: 30s      
-    depends_on:
-      # Uygulama Servisleri -> Sadece 'started' olmaları yeterli    
-      stt-gateway-service:
-        condition: service_started
-      tts-gateway-service:
-        condition: service_started
-      dialog-service:
-        condition: service_started
-
   dialog-service:
     <<: *common-settings
+    image: ghcr.io/sentiric/sentiric-dialog-service:latest
     build:
       context: ../sentiric-dialog-service
       dockerfile: Dockerfile
-    image: ghcr.io/sentiric/sentiric-dialog-service:latest
     volumes:
       - "${CERTIFICATES_REPO_PATH:-../sentiric-certificates}:/sentiric-certificates:ro"
     environment:
       - DIALOG_SERVICE_HTTP_PORT=12060
       - DIALOG_SERVICE_GRPC_PORT=12061
-      - MOCK_LLM=false
-      - env=development
-      - LOG_LEVEL=debug
+      - REDIS_URL=redis:6379
+      - LLM_GATEWAY_SERVICE_TARGET=llm-gateway-service:16021
       - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
       - DIALOG_SERVICE_CERT_PATH=/sentiric-certificates/certs/dialog-service-chain.crt
       - DIALOG_SERVICE_KEY_PATH=/sentiric-certificates/certs/dialog-service.key
-      - REDIS_URL=redis:6379
-      - LLM_GATEWAY_SERVICE_TARGET=llm-gateway-service:16021
-    ports:
-      - "12060:12060"
-      - "12061:12061"
     networks:
       sentiric-net:
-        ipv4_address: ${DIALOG_SERVICE_IPV4_ADDRESS:-10.88.20.6}
+        ipv4_address: 10.88.20.6
     healthcheck:
-      test: [ "CMD", "nc", "-z", "localhost", "12061" ]
+      test: [ "CMD", "curl", "-f", "http://localhost:12060/health" ]
       interval: 10s
-      timeout: 5s
-      retries: 60
-      start_period: 30s      
+      retries: 10
     depends_on:
-      # Uygulama Servisleri -> Sadece 'started' olmaları yeterli    
       redis:
         condition: service_healthy
       llm-gateway-service:
-        condition: service_started
+        condition: service_healthy
+
+  stream-gateway-service:
+    image: ghcr.io/sentiric/sentiric-stream-gateway-service:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - "${CERTIFICATES_REPO_PATH:-../sentiric-certificates}:/sentiric-certificates:ro"
+    environment:
+      - RUST_LOG=info,sentiric_stream_gateway=debug
+      - STREAM_GATEWAY_SERVICE_HOST=stream-gateway-service
+      - STT_GATEWAY_GRPC_URL=https://stt-gateway-service:15021
+      - DIALOG_SERVICE_GRPC_URL=https://dialog-service:12061
+      - TTS_GATEWAY_GRPC_URL=https://tts-gateway-service:14011
+      - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
+      - STREAM_GATEWAY_SERVICE_CERT_PATH=/sentiric-certificates/certs/stream-gateway-service.crt
+      - STREAM_GATEWAY_SERVICE_KEY_PATH=/sentiric-certificates/certs/stream-gateway-service.key
+      # Coqui varsayılan (Yüksek kalite)
+      - TTS_DEFAULT_VOICE_ID=coqui:default
+    ports:
+      - "18030:18030"
+      - "18032:18032"
+    networks:
+      sentiric-net:
+        ipv4_address: 10.88.80.3
+    healthcheck:
+      test: [ "CMD", "timeout", "1s", "bash", "-c", "</dev/tcp/localhost/18030" ]
+      interval: 10s
+      retries: 10
+    depends_on:
+      stt-gateway-service:
+        condition: service_healthy
+      tts-gateway-service:
+        condition: service_healthy
+      dialog-service:
+        condition: service_healthy
