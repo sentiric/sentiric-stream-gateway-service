@@ -115,8 +115,17 @@ services:
       
       # CPU Mode (Stability)
       - LLM_LLAMA_SERVICE_GPU_LAYERS=0
-      - LLM_LLAMA_SERVICE_CONTEXT_SIZE=1024
+      # - LLM_LLAMA_SERVICE_CONTEXT_SIZE=1024
       - LLM_LLAMA_SERVICE_THREADS=4
+
+      # [FIX] Cache sorununu çözmek için KV Offload'ı kapatıyoruz (CPU modunda daha kararlı)
+      - LLM_LLAMA_SERVICE_KV_OFFLOAD=false
+      
+      # [FIX] Context size artır
+      - LLM_LLAMA_SERVICE_CONTEXT_SIZE=4096
+      
+      # [FIX] Batching kapat (Test stabilitesi için)
+      - LLM_LLAMA_SERVICE_ENABLE_BATCHING=false     
       
       # Insecure
       - GRPC_TLS_CA_PATH=
