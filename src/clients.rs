@@ -14,6 +14,8 @@ pub struct GrpcClients {
     pub stt: SttGatewayServiceClient<Channel>,
     pub dialog: DialogServiceClient<Channel>,
     pub tts: TtsGatewayServiceClient<Channel>,
+    // [YENİ] Ses ID'sini burada tutuyoruz
+    pub default_voice_id: String,
 }
 
 impl GrpcClients {
@@ -22,27 +24,26 @@ impl GrpcClients {
 
         let tls_config = load_tls_config(config).await?;
 
-        // 1. STT Service (Lazy)
         let stt_channel = Endpoint::from_shared(config.stt_grpc_url.clone())?
             .tls_config(tls_config.clone())?
-            .connect_lazy(); // Değişiklik burada: await yok, hata fırlatmaz.
+            .connect_lazy();
 
-        // 2. Dialog Service (Lazy)
         let dialog_channel = Endpoint::from_shared(config.dialog_grpc_url.clone())?
             .tls_config(tls_config.clone())?
             .connect_lazy();
 
-        // 3. TTS Service (Lazy)
         let tts_channel = Endpoint::from_shared(config.tts_grpc_url.clone())?
             .tls_config(tls_config.clone())?
             .connect_lazy();
 
-        info!("✅ Backend service endpoints configured. Connections will be established on first request.");
+        info!("✅ Backend service endpoints configured. Voice ID: {}", config.tts_default_voice_id);
 
         Ok(Self {
             stt: SttGatewayServiceClient::new(stt_channel),
             dialog: DialogServiceClient::new(dialog_channel),
             tts: TtsGatewayServiceClient::new(tts_channel),
+            // [YENİ] Config'den transfer
+            default_voice_id: config.tts_default_voice_id.clone(),
         })
     }
 }

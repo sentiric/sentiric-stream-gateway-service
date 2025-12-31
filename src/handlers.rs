@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{info, error, warn};
 use uuid::Uuid;
-use metrics::{counter, gauge}; // Metrikler eklendi
+use metrics::{counter, increment_gauge, decrement_gauge};
 use crate::clients::GrpcClients;
 
 // Contracts
@@ -33,49 +33,44 @@ async fn handle_socket(socket: WebSocket, clients: Arc<GrpcClients>) {
     let session_id = Uuid::new_v4().to_string();
     info!("📱 New Stream Connection. Session: {}", session_id);
     
-    // Metrik: Aktif oturum sayısını artır
-    gauge!("stream_gateway_active_sessions", 1.0);
+    increment_gauge!("stream_gateway_active_sessions", 1.0);
     counter!("stream_gateway_connections_total", 1);
 
     let (mut ws_sender, mut ws_receiver) = socket.split();
+    
+    // [YENİ] Dinamik Ses ID'sini al
+    let voice_id = clients.default_voice_id.clone();
 
     // --- CHANNELS FOR PIPELINE ---
-    // WS -> STT
     let (tx_stt_in, rx_stt_in) = mpsc::channel::<TranscribeStreamRequest>(100);
-    // WS (Text) -> Dialog
     let (tx_dialog_in, rx_dialog_in) = mpsc::channel::<StreamConversationRequest>(100);
     
-    // --- 1. STT LOOP (Audio -> Text) ---
+    // --- 1. STT LOOP ---
     let mut stt_client = clients.stt.clone();
     let tx_dialog_in_clone = tx_dialog_in.clone();
     let session_id_clone = session_id.clone();
 
     let stt_handle = tokio::spawn(async move {
         let request_stream = tokio_stream::wrappers::ReceiverStream::new(rx_stt_in);
-        
         match stt_client.transcribe_stream(request_stream).await {
             Ok(response) => {
                 let mut inbound = response.into_inner();
                 while let Some(result) = inbound.next().await {
                     match result {
                         Ok(stt_resp) => {
-                            if !stt_resp.partial_transcription.is_empty() {
-                                if stt_resp.is_final {
-                                    info!("[{}] STT Final: {}", session_id_clone, stt_resp.partial_transcription);
-                                    counter!("stream_gateway_stt_final_transcripts", 1);
-                                    
-                                    // Text'i Dialog'a gönder
-                                    let dialog_req = StreamConversationRequest {
-                                        payload: Some(stream_conversation_request::Payload::TextInput(stt_resp.partial_transcription)),
-                                    };
-                                    if tx_dialog_in_clone.send(dialog_req).await.is_err() { break; }
-                                    
-                                    // Final sinyalini gönder
-                                    let final_sig = StreamConversationRequest {
-                                        payload: Some(stream_conversation_request::Payload::IsFinalInput(true)),
-                                    };
-                                    if tx_dialog_in_clone.send(final_sig).await.is_err() { break; }
-                                }
+                            if !stt_resp.partial_transcription.is_empty() && stt_resp.is_final {
+                                info!("[{}] STT Final: {}", session_id_clone, stt_resp.partial_transcription);
+                                counter!("stream_gateway_stt_final_transcripts", 1);
+                                
+                                let dialog_req = StreamConversationRequest {
+                                    payload: Some(stream_conversation_request::Payload::TextInput(stt_resp.partial_transcription)),
+                                };
+                                if tx_dialog_in_clone.send(dialog_req).await.is_err() { break; }
+                                
+                                let final_sig = StreamConversationRequest {
+                                    payload: Some(stream_conversation_request::Payload::IsFinalInput(true)),
+                                };
+                                if tx_dialog_in_clone.send(final_sig).await.is_err() { break; }
                             }
                         },
                         Err(e) => error!("STT Stream Error: {}", e),
@@ -86,14 +81,11 @@ async fn handle_socket(socket: WebSocket, clients: Arc<GrpcClients>) {
         }
     });
 
-    // --- 2. DIALOG LOOP (Text -> Response) ---
+    // --- 2. DIALOG LOOP ---
     let mut dialog_client = clients.dialog.clone();
     let tts_client = clients.tts.clone();
-    
-    // WS Writer Channel
     let (tx_ws_out, mut rx_ws_out) = mpsc::channel::<Message>(100);
 
-    // Initial Dialog Handshake
     let init_req = StreamConversationRequest {
         payload: Some(stream_conversation_request::Payload::Config(ConversationConfig {
             session_id: session_id.clone(),
@@ -104,7 +96,6 @@ async fn handle_socket(socket: WebSocket, clients: Arc<GrpcClients>) {
 
     let dialog_handle = tokio::spawn(async move {
         let request_stream = tokio_stream::wrappers::ReceiverStream::new(rx_dialog_in);
-        
         match dialog_client.stream_conversation(request_stream).await {
             Ok(response) => {
                 let mut inbound = response.into_inner();
@@ -116,21 +107,19 @@ async fn handle_socket(socket: WebSocket, clients: Arc<GrpcClients>) {
                                     info!("Dialog Response: {}", text);
                                     counter!("stream_gateway_dialog_responses", 1);
 
-                                    // 1. İstemciye Alt Yazı Olarak Gönder
                                     let json = serde_json::json!({ "type": "subtitle", "text": text });
                                     let _ = tx_ws_out.send(Message::Text(json.to_string())).await;
 
-                                    // 2. TTS'e Gönder (Seslendirme)
+                                    // [YENİ] Dinamik Ses ID Kullanılıyor
                                     let tts_req = SynthesizeStreamRequest {
                                         text: text.clone(),
                                         text_type: TextType::Text as i32, 
-                                        voice_id: "mms:tur".to_string(), // Varsayılan: MMS (Hızlı)
+                                        voice_id: voice_id.clone(), 
                                         audio_config: None,
-                                        preferred_provider: "mms".to_string(),
+                                        preferred_provider: "auto".to_string(),
                                         prosody: None,
                                     };
                                     
-                                    // TTS Call
                                     let mut t_client = tts_client.clone();
                                     let tx_out = tx_ws_out.clone();
                                     
@@ -170,23 +159,20 @@ async fn handle_socket(socket: WebSocket, clients: Arc<GrpcClients>) {
         }
     });
 
-    // --- 4. WS READ LOOP (Main Control) ---
+    // --- 4. WS READ LOOP ---
     while let Some(Ok(msg)) = ws_receiver.next().await {
         match msg {
             Message::Binary(data) => {
-                // Fallback: Raw Audio (Web UI)
                 counter!("stream_gateway_audio_bytes_received", data.len() as u64);
                 let req = TranscribeStreamRequest { audio_chunk: data };
                 if tx_stt_in.send(req).await.is_err() { break; }
             },
             Message::Text(text) => {
                 info!("[{}] User Text: {}", session_id, text);
-                // Raw Text (Chat)
                 let req = StreamConversationRequest {
                     payload: Some(stream_conversation_request::Payload::TextInput(text)),
                 };
                 if tx_dialog_in.send(req).await.is_err() { break; }
-                
                 let fin = StreamConversationRequest {
                     payload: Some(stream_conversation_request::Payload::IsFinalInput(true)),
                 };
@@ -198,9 +184,7 @@ async fn handle_socket(socket: WebSocket, clients: Arc<GrpcClients>) {
     }
 
     info!("🔌 Client Disconnected. Session: {}", session_id);
-    
-    // Temizlik ve Metrik Düşümü
-    gauge!("stream_gateway_active_sessions", -1.0);
+    decrement_gauge!("stream_gateway_active_sessions", 1.0);
     write_handle.abort();
     stt_handle.abort();
     dialog_handle.abort();
