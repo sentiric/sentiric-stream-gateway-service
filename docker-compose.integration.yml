@@ -49,34 +49,49 @@ services:
     healthcheck:
       test: [ "CMD", "redis-cli", "ping" ]
 
-  # --- AI SERVİSLERİ ---
+  # --- AI SERVİSLERİ (ENGINE LAYERS) ---
   
   stt-whisper-service:
     <<: *common-settings
     image: ghcr.io/sentiric/sentiric-stt-whisper-service:latest-gpu
     build:
       context: ../sentiric-stt-whisper-service
-      dockerfile: Dockerfile.gpu
+      dockerfile: Dockerfile
     volumes:
       - "${CERTIFICATES_REPO_PATH:-../sentiric-certificates}:/sentiric-certificates:ro"
       - stt-whisper-models:/models
     environment:
+      # [FIX] Human Readable Logs
+      - ENV=development
+      - STT_WHISPER_SERVICE_LOG_LEVEL=info
+      
       - STT_WHISPER_SERVICE_HOST=stt-whisper-service
       - STT_WHISPER_SERVICE_HTTP_PORT=15030
       - STT_WHISPER_SERVICE_GRPC_PORT=15031
-      - STT_WHISPER_SERVICE_DEVICE=cuda
-      - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
-      - STT_WHISPER_SERVICE_CERT_PATH=/sentiric-certificates/certs/stt-whisper-service.crt
-      - STT_WHISPER_SERVICE_KEY_PATH=/sentiric-certificates/certs/stt-whisper-service.key
-      - STT_WHISPER_SERVICE_MODEL_FILENAME=ggml-large-v3-turbo-q5_0.bin
-      - STT_WHISPER_SERVICE_VAD_THRESHOLD=0.75
+      
+      # CPU Mode (Stability)
+      - STT_WHISPER_SERVICE_DEVICE=cpu
+      - STT_WHISPER_SERVICE_COMPUTE_TYPE=float32
+      - STT_WHISPER_SERVICE_MODEL_FILENAME=ggml-base.bin
+      
+      # Tuning
+      - STT_WHISPER_SERVICE_VAD_THRESHOLD=0.5
+      - STT_WHISPER_SERVICE_VAD_MS_SILENCE_TO_PROMPT=500
+      - STT_WHISPER_SERVICE_LANGUAGE=tr
+      
+      # Insecure
+      - GRPC_TLS_CA_PATH=
+      - STT_WHISPER_SERVICE_CERT_PATH=
+      - STT_WHISPER_SERVICE_KEY_PATH=
     networks:
       sentiric-net:
         ipv4_address: 10.88.50.3
+    ports:
+      - "15030:15030"
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:15030/health" ]
       interval: 30s
-      timeout: 5s
+      timeout: 10s
       retries: 20
 
   llm-llama-service:
@@ -90,14 +105,23 @@ services:
       - llm-llama-models:/models
       - llm-llama-loras:/lora_adapters
     environment:
+      # [FIX] Human Readable Logs
+      - ENV=development
+      - LLM_LLAMA_SERVICE_LOG_LEVEL=info
+
       - LLM_LLAMA_SERVICE_HOST=llm-llama-service
       - LLM_LLAMA_SERVICE_HTTP_PORT=16070
       - LLM_LLAMA_SERVICE_GRPC_PORT=16071
-      - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
-      - LLM_LLAMA_SERVICE_CERT_PATH=/sentiric-certificates/certs/llm-llama-service-chain.crt
-      - LLM_LLAMA_SERVICE_KEY_PATH=/sentiric-certificates/certs/llm-llama-service.key
-      - LLM_LLAMA_SERVICE_GPU_LAYERS=100
-      - LLM_LLAMA_SERVICE_CONTEXT_SIZE=2048
+      
+      # CPU Mode (Stability)
+      - LLM_LLAMA_SERVICE_GPU_LAYERS=0
+      - LLM_LLAMA_SERVICE_CONTEXT_SIZE=1024
+      - LLM_LLAMA_SERVICE_THREADS=4
+      
+      # Insecure
+      - GRPC_TLS_CA_PATH=
+      - LLM_LLAMA_SERVICE_CERT_PATH=
+      - LLM_LLAMA_SERVICE_KEY_PATH=
     networks:
       sentiric-net:
         ipv4_address: 10.88.60.7
@@ -118,12 +142,21 @@ services:
       - "${ASSETS_REPO_PATH:-../sentiric-assets}/docs/audio/speakers:/app/speakers"
       - tts-coqui-models:/root/.local/share/tts
     environment:
+      # [FIX] Human Readable Logs
+      - ENV=development
+      - TTS_COQUI_SERVICE_DEBUG=true
+
       - TTS_COQUI_SERVICE_HTTP_PORT=14030
       - TTS_COQUI_SERVICE_GRPC_PORT=14031
-      - TTS_COQUI_SERVICE_DEVICE=cuda
-      - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
-      - TTS_COQUI_SERVICE_CERT_PATH=/sentiric-certificates/certs/tts-coqui-service.crt
-      - TTS_COQUI_SERVICE_KEY_PATH=/sentiric-certificates/certs/tts-coqui-service.key
+      
+      # CPU Mode
+      - TTS_COQUI_SERVICE_DEVICE=cpu
+      - TTS_COQUI_SERVICE_LOW_RESOURCE_MODE=true
+      
+      # Insecure
+      - GRPC_TLS_CA_PATH=
+      - TTS_COQUI_SERVICE_CERT_PATH=
+      - TTS_COQUI_SERVICE_KEY_PATH=
     networks:
       sentiric-net:
         ipv4_address: 10.88.40.3
@@ -143,13 +176,19 @@ services:
       - "${CERTIFICATES_REPO_PATH:-../sentiric-certificates}:/sentiric-certificates:ro"
       - tts-mms-cache:/app/cache
     environment:
+      # [FIX] Human Readable Logs
+      - ENV=development
+      
       - TTS_MMS_SERVICE_HTTP_PORT=14060
       - TTS_MMS_SERVICE_GRPC_PORT=14061
-      - TTS_MMS_SERVICE_DEVICE=cuda
-      - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
-      # DÜZELTME: Dosya isimleri standarda uygun hale getirildi
-      - TTS_MMS_SERVICE_CERT_PATH=/sentiric-certificates/certs/tts-mms-service.crt
-      - TTS_MMS_SERVICE_KEY_PATH=/sentiric-certificates/certs/tts-mms-service.key
+      
+      # CPU Mode
+      - TTS_MMS_SERVICE_DEVICE=cpu
+      
+      # Insecure
+      - GRPC_TLS_CA_PATH=
+      - TTS_MMS_SERVICE_CERT_PATH=
+      - TTS_MMS_SERVICE_KEY_PATH=
     networks:
       sentiric-net:
         ipv4_address: 10.88.40.6
@@ -159,7 +198,7 @@ services:
       timeout: 10s
       retries: 20
 
-  # --- GATEWAY & LOGIC SERVİSLERİ ---
+  # --- GATEWAY & LOGIC SERVİSLERİ (RUST) ---
 
   llm-gateway-service:
     <<: *common-settings
@@ -170,12 +209,18 @@ services:
     volumes:
       - "${CERTIFICATES_REPO_PATH:-../sentiric-certificates}:/sentiric-certificates:ro"
     environment:
+      # [FIX] Pretty Logs
+      - ENV=development
+      - RUST_LOG=info,sentiric_llm_gateway=debug
+      
       - LLM_GATEWAY_SERVICE_HTTP_PORT=16020
       - LLM_GATEWAY_SERVICE_GRPC_PORT=16021
-      - LLM_LLAMA_SERVICE_GRPC_URL=https://llm-llama-service:16071
-      - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
-      - LLM_GATEWAY_SERVICE_CERT_PATH=/sentiric-certificates/certs/llm-gateway-service.crt
-      - LLM_GATEWAY_SERVICE_KEY_PATH=/sentiric-certificates/certs/llm-gateway-service.key
+      - LLM_LLAMA_SERVICE_GRPC_URL=http://llm-llama-service:16071
+      
+      # Insecure
+      - GRPC_TLS_CA_PATH=
+      - LLM_GATEWAY_SERVICE_CERT_PATH=
+      - LLM_GATEWAY_SERVICE_KEY_PATH=
     networks:
       sentiric-net:
         ipv4_address: 10.88.60.2
@@ -196,12 +241,22 @@ services:
     volumes:
       - "${CERTIFICATES_REPO_PATH:-../sentiric-certificates}:/sentiric-certificates:ro"
     environment:
+      # [FIX] Pretty Logs
+      - ENV=development
+      - RUST_LOG=info,sentiric_stt_gateway=debug
+
+      - STT_GATEWAY_SERVICE_HOST=stt-gateway-service
+      - STT_GATEWAY_SERVICE_LISTEN_ADDRESS=0.0.0.0
       - STT_GATEWAY_SERVICE_HTTP_PORT=15020
       - STT_GATEWAY_SERVICE_GRPC_PORT=15021
-      - STT_WHISPER_SERVICE_GRPC_URL=https://stt-whisper-service:15031
-      - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
-      - STT_GATEWAY_SERVICE_CERT_PATH=/sentiric-certificates/certs/stt-gateway-service.crt
-      - STT_GATEWAY_SERVICE_KEY_PATH=/sentiric-certificates/certs/stt-gateway-service.key
+      - STT_GATEWAY_SERVICE_METRICS_PORT=15022
+      
+      - STT_WHISPER_SERVICE_GRPC_URL=http://stt-whisper-service:15031
+      
+      # Insecure
+      - GRPC_TLS_CA_PATH=
+      - STT_GATEWAY_SERVICE_CERT_PATH=
+      - STT_GATEWAY_SERVICE_KEY_PATH=
     networks:
       sentiric-net:
         ipv4_address: 10.88.50.2
@@ -222,13 +277,20 @@ services:
     volumes:
       - "${CERTIFICATES_REPO_PATH:-../sentiric-certificates}:/sentiric-certificates:ro"
     environment:
+      # [FIX] Pretty Logs
+      - ENV=development
+      - RUST_LOG=info,sentiric_tts_gateway=debug
+
       - TTS_GATEWAY_SERVICE_HTTP_PORT=14010
       - TTS_GATEWAY_SERVICE_GRPC_PORT=14011
-      - TTS_COQUI_SERVICE_URL=https://tts-coqui-service:14031
-      - TTS_MMS_SERVICE_URL=https://tts-mms-service:14061
-      - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
-      - TTS_GATEWAY_SERVICE_CERT_PATH=/sentiric-certificates/certs/tts-gateway-service.crt
-      - TTS_GATEWAY_SERVICE_KEY_PATH=/sentiric-certificates/certs/tts-gateway-service.key
+      
+      - TTS_COQUI_SERVICE_URL=http://tts-coqui-service:14031
+      - TTS_MMS_SERVICE_URL=http://tts-mms-service:14061
+      
+      # Insecure
+      - GRPC_TLS_CA_PATH=
+      - TTS_GATEWAY_SERVICE_CERT_PATH=
+      - TTS_GATEWAY_SERVICE_KEY_PATH=
     networks:
       sentiric-net:
         ipv4_address: 10.88.40.1
@@ -249,13 +311,19 @@ services:
     volumes:
       - "${CERTIFICATES_REPO_PATH:-../sentiric-certificates}:/sentiric-certificates:ro"
     environment:
+      # [FIX] Pretty Logs (Go Zerolog)
+      - ENV=development
+      - LOG_LEVEL=debug
+      
       - DIALOG_SERVICE_HTTP_PORT=12060
       - DIALOG_SERVICE_GRPC_PORT=12061
       - REDIS_URL=redis:6379
       - LLM_GATEWAY_SERVICE_TARGET=llm-gateway-service:16021
-      - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
-      - DIALOG_SERVICE_CERT_PATH=/sentiric-certificates/certs/dialog-service-chain.crt
-      - DIALOG_SERVICE_KEY_PATH=/sentiric-certificates/certs/dialog-service.key
+      
+      # Insecure
+      - GRPC_TLS_CA_PATH=
+      - DIALOG_SERVICE_CERT_PATH=
+      - DIALOG_SERVICE_KEY_PATH=
     networks:
       sentiric-net:
         ipv4_address: 10.88.20.6
@@ -277,16 +345,21 @@ services:
     volumes:
       - "${CERTIFICATES_REPO_PATH:-../sentiric-certificates}:/sentiric-certificates:ro"
     environment:
+      # [FIX] Pretty Logs
+      - ENV=development
       - RUST_LOG=info,sentiric_stream_gateway=debug
+
       - STREAM_GATEWAY_SERVICE_HOST=stream-gateway-service
-      - STT_GATEWAY_GRPC_URL=https://stt-gateway-service:15021
-      - DIALOG_SERVICE_GRPC_URL=https://dialog-service:12061
-      - TTS_GATEWAY_GRPC_URL=https://tts-gateway-service:14011
-      - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
-      - STREAM_GATEWAY_SERVICE_CERT_PATH=/sentiric-certificates/certs/stream-gateway-service.crt
-      - STREAM_GATEWAY_SERVICE_KEY_PATH=/sentiric-certificates/certs/stream-gateway-service.key
-      # Coqui varsayılan (Yüksek kalite)
-      - TTS_DEFAULT_VOICE_ID=coqui:default
+      - STT_GATEWAY_GRPC_URL=http://stt-gateway-service:15021
+      - DIALOG_SERVICE_GRPC_URL=http://dialog-service:12061
+      - TTS_GATEWAY_GRPC_URL=http://tts-gateway-service:14011
+
+      # Insecure
+      - GRPC_TLS_CA_PATH=
+      - STREAM_GATEWAY_SERVICE_CERT_PATH=
+      - STREAM_GATEWAY_SERVICE_KEY_PATH=
+      
+      - TTS_DEFAULT_VOICE_ID=mms:tur      
     ports:
       - "18030:18030"
       - "18032:18032"

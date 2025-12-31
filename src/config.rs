@@ -5,6 +5,7 @@ use anyhow::Result;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
+    #[allow(dead_code)]
     pub env: String,
     pub host: String,
     pub http_port: u16,
@@ -21,7 +22,6 @@ pub struct AppConfig {
     pub stream_gateway_service_cert_path: String,
     pub stream_gateway_service_key_path: String,
 
-    // [YENİ] Varsayılan Ses Kimliği (Default: coqui:default)
     pub tts_default_voice_id: String,
 }
 
@@ -31,6 +31,12 @@ impl AppConfig {
             .add_source(File::with_name(".env").required(false))
             .add_source(Environment::default().separator("__"))
             
+            // [FIX] Ortam Değişkenlerini Manuel Eşleştir (Mapping)
+            // Docker Compose'daki isimler -> Struct'taki isimler
+            .set_override_option("stt_grpc_url", env::var("STT_GATEWAY_GRPC_URL").ok())?
+            .set_override_option("dialog_grpc_url", env::var("DIALOG_SERVICE_GRPC_URL").ok())?
+            .set_override_option("tts_grpc_url", env::var("TTS_GATEWAY_GRPC_URL").ok())?
+            
             .set_override_option("host", env::var("STREAM_GATEWAY_SERVICE_IPV4_ADDRESS").ok())?
             .set_override_option("http_port", env::var("STREAM_GATEWAY_SERVICE_HTTP_PORT").ok())?
             
@@ -39,15 +45,15 @@ impl AppConfig {
             .set_default("host", "0.0.0.0")?
             .set_default("http_port", 18030)?
             
-            .set_default("stt_grpc_url", "https://stt-gateway-service:15021")?
-            .set_default("dialog_grpc_url", "https://dialog-service:12061")?
-            .set_default("tts_grpc_url", "https://tts-gateway-service:14011")?
+            // [FIX] Varsayılanları HTTP (Insecure) yap
+            .set_default("stt_grpc_url", "http://stt-gateway-service:15021")?
+            .set_default("dialog_grpc_url", "http://dialog-service:12061")?
+            .set_default("tts_grpc_url", "http://tts-gateway-service:14011")?
 
             .set_default("grpc_tls_ca_path", "/sentiric-certificates/certs/ca.crt")?
             .set_default("stream_gateway_service_cert_path", "/sentiric-certificates/certs/stream-gateway-service.crt")?
             .set_default("stream_gateway_service_key_path", "/sentiric-certificates/certs/stream-gateway-service.key")?
             
-            // [YENİ] Varsayılan olarak Coqui kullan (Kalite öncelikli)
             .set_default("tts_default_voice_id", "coqui:default")?;
 
         builder.build()?.try_deserialize().map_err(|e| e.into())

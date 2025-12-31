@@ -10,6 +10,9 @@ use tracing::{info, error, warn};
 use uuid::Uuid;
 use metrics::{counter, increment_gauge, decrement_gauge};
 use crate::clients::GrpcClients;
+use tonic::metadata::MetadataValue;
+// FIX: Eksik trait eklendi
+use std::str::FromStr;
 
 // Contracts
 use sentiric_contracts::sentiric::{
@@ -29,7 +32,6 @@ pub async fn ws_handler(
     ws.on_upgrade(|socket| handle_socket(socket, clients))
 }
 
-// Telemetri Mesajı Helper
 fn create_telemetry(phase: &str, status: &str, detail: &str) -> Message {
     let json = serde_json::json!({
         "type": "telemetry",
@@ -56,10 +58,9 @@ async fn handle_socket(socket: WebSocket, clients: Arc<GrpcClients>) {
     let (tx_dialog_in, rx_dialog_in) = mpsc::channel::<StreamConversationRequest>(100);
     let (tx_ws_out, mut rx_ws_out) = mpsc::channel::<Message>(100);
 
-    // Initial Telemetry
     let _ = ws_sender.send(create_telemetry("gateway", "connected", &format!("Session: {}", session_id))).await;
 
-    // --- 1. STT LOOP ---
+    // --- 1. STT LOOP (Trace ID Added) ---
     let mut stt_client = clients.stt.clone();
     let tx_dialog_in_clone = tx_dialog_in.clone();
     let tx_ws_out_stt = tx_ws_out.clone();
@@ -67,7 +68,13 @@ async fn handle_socket(socket: WebSocket, clients: Arc<GrpcClients>) {
 
     let stt_handle = tokio::spawn(async move {
         let request_stream = tokio_stream::wrappers::ReceiverStream::new(rx_stt_in);
-        match stt_client.transcribe_stream(request_stream).await {
+        
+        let mut request = tonic::Request::new(request_stream);
+        if let Ok(meta_val) = MetadataValue::from_str(&session_id_clone) {
+            request.metadata_mut().insert("x-trace-id", meta_val);
+        }
+
+        match stt_client.transcribe_stream(request).await {
             Ok(response) => {
                 let mut inbound = response.into_inner();
                 while let Some(result) = inbound.next().await {
@@ -78,20 +85,15 @@ async fn handle_socket(socket: WebSocket, clients: Arc<GrpcClients>) {
                                     info!("[{}] STT Final: {}", session_id_clone, stt_resp.partial_transcription);
                                     let _ = tx_ws_out_stt.send(create_telemetry("stt", "final", &stt_resp.partial_transcription)).await;
                                     
-                                    // Dialog'a gönder
                                     let dialog_req = StreamConversationRequest {
                                         payload: Some(stream_conversation_request::Payload::TextInput(stt_resp.partial_transcription)),
                                     };
                                     if tx_dialog_in_clone.send(dialog_req).await.is_err() { break; }
                                     
-                                    // Final sinyali
                                     let final_sig = StreamConversationRequest {
                                         payload: Some(stream_conversation_request::Payload::IsFinalInput(true)),
                                     };
                                     if tx_dialog_in_clone.send(final_sig).await.is_err() { break; }
-                                } else {
-                                    // Partial sonuçları loglama (Çok gürültü yapmasın), ama UI'a partial text gönderebiliriz
-                                    // let _ = tx_ws_out_stt.send(create_telemetry("stt", "partial", &stt_resp.partial_transcription)).await;
                                 }
                             }
                         },
@@ -106,23 +108,29 @@ async fn handle_socket(socket: WebSocket, clients: Arc<GrpcClients>) {
         }
     });
 
-    // --- 2. DIALOG LOOP ---
+    // --- 2. DIALOG LOOP (Trace ID Added) ---
     let mut dialog_client = clients.dialog.clone();
     let tts_client = clients.tts.clone();
     let tx_ws_out_dialog = tx_ws_out.clone();
+    let session_id_dialog = session_id.clone();
 
-    // Dialog Config Gönder
     let init_req = StreamConversationRequest {
         payload: Some(stream_conversation_request::Payload::Config(ConversationConfig {
             session_id: session_id.clone(),
-            user_id: "anonymous".to_string(),
+            user_id: "simulation_bot".to_string(),
         })),
     };
     let _ = tx_dialog_in.send(init_req).await;
 
     let dialog_handle = tokio::spawn(async move {
         let request_stream = tokio_stream::wrappers::ReceiverStream::new(rx_dialog_in);
-        match dialog_client.stream_conversation(request_stream).await {
+        
+        let mut request = tonic::Request::new(request_stream);
+        if let Ok(meta_val) = MetadataValue::from_str(&session_id_dialog) {
+            request.metadata_mut().insert("x-trace-id", meta_val);
+        }
+
+        match dialog_client.stream_conversation(request).await {
             Ok(response) => {
                 let mut inbound = response.into_inner();
                 while let Some(result) = inbound.next().await {
@@ -130,14 +138,16 @@ async fn handle_socket(socket: WebSocket, clients: Arc<GrpcClients>) {
                         Ok(dialog_resp) => {
                             match dialog_resp.payload {
                                 Some(stream_conversation_response::Payload::TextResponse(text)) => {
-                                    info!("Dialog Response: {}", text);
+                                    // [FIX] Log Kirliliğini Önleme: Sadece boş olmayan ve uzun metinleri veya cümle sonlarını logla
+                                    if text.len() > 1 || text.chars().last().map_or(false, |c| ".!?".contains(c)) {
+                                         info!("Dialog Partial Response: {}", text);
+                                    }
+                                    // info!("Dialog Response: {}", text);
                                     let _ = tx_ws_out_dialog.send(create_telemetry("llm", "response", &text)).await;
 
-                                    // Altyazı gönder
                                     let json = serde_json::json!({ "type": "subtitle", "text": text });
                                     let _ = tx_ws_out_dialog.send(Message::Text(json.to_string())).await;
 
-                                    // TTS Başlat
                                     let tts_req = SynthesizeStreamRequest {
                                         text: text.clone(),
                                         text_type: TextType::Text as i32, 
@@ -149,15 +159,19 @@ async fn handle_socket(socket: WebSocket, clients: Arc<GrpcClients>) {
                                     
                                     let mut t_client = tts_client.clone();
                                     let tx_out = tx_ws_out_dialog.clone();
+                                    let sid = session_id_dialog.clone();
                                     
                                     tokio::spawn(async move {
                                         let _ = tx_out.send(create_telemetry("tts", "processing", "Synthesizing audio...")).await;
-                                        let req = tonic::Request::new(tts_req);
+                                        let mut req = tonic::Request::new(tts_req);
+                                        if let Ok(mv) = MetadataValue::from_str(&sid) {
+                                            req.metadata_mut().insert("x-trace-id", mv);
+                                        }
+
                                         if let Ok(tts_res) = t_client.synthesize_stream(req).await {
                                             let mut tts_stream = tts_res.into_inner();
                                             while let Some(audio_res) = tts_stream.next().await {
                                                 if let Ok(chunk) = audio_res {
-                                                    // Ses verisini gönder
                                                     let _ = tx_out.send(Message::Binary(chunk.audio_content)).await;
                                                 }
                                             }
@@ -182,9 +196,7 @@ async fn handle_socket(socket: WebSocket, clients: Arc<GrpcClients>) {
     // --- 3. WS WRITE LOOP ---
     let write_handle = tokio::spawn(async move {
         while let Some(msg) = rx_ws_out.recv().await {
-            if ws_sender.send(msg).await.is_err() {
-                break;
-            }
+            if ws_sender.send(msg).await.is_err() { break; }
         }
     });
 
@@ -199,7 +211,6 @@ async fn handle_socket(socket: WebSocket, clients: Arc<GrpcClients>) {
             Message::Text(text) => {
                 info!("[{}] User Text: {}", session_id, text);
                 let _ = tx_ws_out.send(create_telemetry("client", "text_input", &text)).await;
-                
                 let req = StreamConversationRequest {
                     payload: Some(stream_conversation_request::Payload::TextInput(text)),
                 };
