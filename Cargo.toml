@@ -1,6 +1,6 @@
 [package]
 name = "sentiric-stream-gateway-service"
-version = "0.1.0"
+version = "0.2.1"
 edition = "2021"
 
 [dependencies]
@@ -30,8 +30,15 @@ anyhow = "1.0"
 # Observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+metrics = "0.21"
+metrics-exporter-prometheus = "0.12"
 
 # Contracts (Git Dependency)
 [dependencies.sentiric-contracts]
 git = "https://github.com/sentiric/sentiric-contracts.git"
 tag = "v1.13.2"
+
+[dev-dependencies]
+tokio-tungstenite = "0.20"
+url = "2.4"
+hound = "3.5"
