@@ -1,77 +1,148 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="tr">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sentiric Stream Gateway - Live Debugger</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Sentiric AI | Voice Intelligence</title>
+    <link rel="icon" href="data:;base64,iVBORw0KGgo=">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         :root {
-            --bg-color: #0d1117;
-            --terminal-bg: #161b22;
-            --text-primary: #c9d1d9;
-            --accent-color: #58a6ff;
-            --success-color: #3fb950;
-            --error-color: #f85149;
-            --warning-color: #d29922;
+            --bg-app: #0f172a;
+            --bg-panel: #1e293b;
+            --primary: #6366f1;
+            --user-bubble: #3b82f6;
+            --ai-bubble: #334155;
+            --text: #f8fafc;
+            --text-muted: #94a3b8;
+            --accent-green: #10b981;
+            --accent-red: #ef4444;
         }
-        body { margin: 0; padding: 20px; font-family: 'Consolas', 'Monaco', monospace; background: var(--bg-color); color: var(--text-primary); display: flex; gap: 20px; height: 95vh; }
-        
-        .panel { flex: 1; background: var(--terminal-bg); border: 1px solid #30363d; border-radius: 6px; display: flex; flex-direction: column; overflow: hidden; }
-        .panel-header { background: #21262d; padding: 10px; font-weight: bold; border-bottom: 1px solid #30363d; display: flex; justify-content: space-between; align-items: center; }
-        
-        /* Chat Area */
-        #chat-area { flex: 1; padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
-        .bubble { max-width: 80%; padding: 10px; border-radius: 8px; font-size: 14px; line-height: 1.4; animation: fadeIn 0.3s; }
-        .user { align-self: flex-end; background: #1f6feb; color: white; }
-        .ai { align-self: flex-start; background: #30363d; border: 1px solid #484f58; }
-        .subtitle { font-size: 12px; color: #8b949e; margin-bottom: 4px; display: block; }
 
-        /* Terminal Area */
-        #log-area { flex: 1; padding: 10px; overflow-y: auto; font-size: 12px; font-family: 'Courier New', monospace; background: #0d1117; color: #8b949e; }
-        .log-entry { margin-bottom: 4px; border-left: 3px solid transparent; padding-left: 8px; }
-        .log-stt { border-color: var(--warning-color); color: #e3b341; }
-        .log-llm { border-color: var(--accent-color); color: #79c0ff; }
-        .log-tts { border-color: var(--success-color); color: #56d364; }
-        .log-error { border-color: var(--error-color); color: #ffa198; }
+        * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+        body { background: var(--bg-app); color: var(--text); font-family: 'Inter', sans-serif; height: 100vh; overflow: hidden; display: flex; }
 
+        /* Layout */
+        .app-container { display: flex; width: 100%; height: 100%; }
+        
+        /* Main Chat Area */
+        .chat-zone { flex: 1; display: flex; flex-direction: column; position: relative; max-width: 100%; }
+        
+        /* Telemetry Panel (Desktop Only) */
+        .telemetry-zone { width: 350px; background: #0b1120; border-left: 1px solid #334155; display: flex; flex-direction: column; transition: transform 0.3s; }
+        
+        @media (max-width: 768px) {
+            .telemetry-zone { position: fixed; right: 0; top: 0; bottom: 0; transform: translateX(100%); z-index: 50; }
+            .telemetry-zone.open { transform: translateX(0); }
+        }
+
+        /* Header */
+        .header { height: 60px; padding: 0 20px; display: flex; align-items: center; justify-content: space-between; background: rgba(15, 23, 42, 0.95); backdrop-filter: blur(10px); border-bottom: 1px solid #334155; z-index: 10; }
+        .brand { font-weight: 600; font-size: 16px; letter-spacing: -0.5px; display: flex; align-items: center; gap: 8px; }
+        .status-dot { width: 8px; height: 8px; background: var(--accent-red); border-radius: 50%; box-shadow: 0 0 8px var(--accent-red); transition: 0.3s; }
+        .status-dot.online { background: var(--accent-green); box-shadow: 0 0 8px var(--accent-green); }
+
+        /* Messages */
+        #messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 24px; scroll-behavior: smooth; }
+        .msg-row { display: flex; gap: 12px; animation: slideIn 0.3s ease; max-width: 800px; margin: 0 auto; width: 100%; }
+        .msg-row.user { flex-direction: row-reverse; }
+        
+        .avatar { width: 36px; height: 36px; border-radius: 10px; background: #334155; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+        .msg-row.user .avatar { background: var(--user-bubble); }
+        .msg-row.ai .avatar { background: var(--primary); }
+        
+        .bubble { background: var(--ai-bubble); padding: 12px 16px; border-radius: 16px; font-size: 15px; line-height: 1.5; color: #e2e8f0; border-top-left-radius: 2px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .msg-row.user .bubble { background: var(--user-bubble); color: white; border-top-left-radius: 16px; border-top-right-radius: 2px; }
+
+        .meta { font-size: 11px; color: var(--text-muted); margin-top: 4px; display: flex; gap: 8px; }
+        
         /* Controls */
-        .controls { padding: 20px; border-top: 1px solid #30363d; display: flex; gap: 10px; align-items: center; justify-content: center; }
-        .btn { padding: 12px 24px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; transition: all 0.2s; font-size: 16px; display: flex; align-items: center; gap: 8px; }
-        .btn-mic { background: #238636; color: white; }
-        .btn-mic.recording { background: #da3633; animation: pulse 1.5s infinite; }
-        .status-badge { padding: 4px 8px; border-radius: 4px; font-size: 11px; background: #30363d; }
-        .status-badge.connected { background: #238636; color: white; }
+        .controls { padding: 20px; background: var(--bg-app); display: flex; flex-direction: column; align-items: center; gap: 10px; border-top: 1px solid #334155; z-index: 10; }
+        
+        .mic-wrapper { position: relative; width: 72px; height: 72px; display: flex; align-items: center; justify-content: center; }
+        .mic-btn { width: 64px; height: 64px; border-radius: 50%; background: #334155; color: white; border: none; font-size: 24px; cursor: pointer; transition: all 0.3s; z-index: 2; display: flex; align-items: center; justify-content: center; }
+        .mic-btn:hover { background: #475569; transform: scale(1.05); }
+        .mic-btn.active { background: var(--accent-red); box-shadow: 0 0 0 4px rgba(239, 68, 68, 0.2); }
+        .mic-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        
+        .mic-ripple { position: absolute; width: 100%; height: 100%; border-radius: 50%; border: 2px solid var(--primary); opacity: 0; transform: scale(0.8); transition: 0.1s; }
+        .mic-ripple.listening { animation: ripple 1.5s infinite; opacity: 1; }
 
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-        @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(218, 54, 51, 0.4); } 70% { box-shadow: 0 0 0 10px rgba(218, 54, 51, 0); } 100% { box-shadow: 0 0 0 0 rgba(218, 54, 51, 0); } }
+        .status-text { font-size: 12px; color: var(--text-muted); font-weight: 500; height: 16px; }
+
+        /* Telemetry */
+        .logs-header { padding: 15px; border-bottom: 1px solid #334155; font-size: 12px; font-weight: 700; color: var(--text-muted); display: flex; justify-content: space-between; }
+        #logs { flex: 1; overflow-y: auto; padding: 15px; font-family: 'JetBrains Mono', monospace; font-size: 11px; }
+        .log-entry { margin-bottom: 6px; display: flex; gap: 8px; opacity: 0.8; }
+        .log-entry:hover { opacity: 1; }
+        .tag { font-weight: 700; min-width: 35px; }
+        .tag.stt { color: #fbbf24; }
+        .tag.llm { color: #818cf8; }
+        .tag.tts { color: #34d399; }
+        .tag.sys { color: #94a3b8; }
+
+        /* Thinking Animation */
+        .typing { display: flex; gap: 4px; padding: 4px 0; }
+        .dot { width: 6px; height: 6px; background: #94a3b8; border-radius: 50%; animation: bounce 1.4s infinite ease-in-out both; }
+        .dot:nth-child(1) { animation-delay: -0.32s; }
+        .dot:nth-child(2) { animation-delay: -0.16s; }
+        @keyframes bounce { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
+        @keyframes slideIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes ripple { 0% { transform: scale(0.9); opacity: 1; } 100% { transform: scale(1.6); opacity: 0; } }
+
+        /* Toggles */
+        .toggle-btn { background: none; border: 1px solid #334155; color: var(--text-muted); padding: 6px 12px; border-radius: 8px; font-size: 11px; cursor: pointer; display: flex; align-items: center; gap: 6px; }
+        .toggle-btn.active { background: rgba(99, 102, 241, 0.2); color: var(--primary); border-color: var(--primary); }
+
     </style>
 </head>
 <body>
 
-    <div class="panel" style="flex: 2;">
-        <div class="panel-header">
-            <span>💬 Live Conversation</span>
-            <span id="connStatus" class="status-badge">Disconnected</span>
+<div class="app-container">
+    <div class="chat-zone">
+        <div class="header">
+            <div class="brand">
+                <div id="connStatus" class="status-dot"></div>
+                SENTIRIC AI
+            </div>
+            <div style="display: flex; gap: 10px;">
+                <button class="toggle-btn active" id="handsFreeBtn">
+                    <i class="fas fa-headset"></i> Hands-Free
+                </button>
+                <button class="toggle-btn md:hidden" onclick="document.querySelector('.telemetry-zone').classList.toggle('open')">
+                    <i class="fas fa-code"></i> Logs
+                </button>
+            </div>
         </div>
-        <div id="chat-area">
-            <div class="bubble ai"><span class="subtitle">System</span>Sentiric Gateway'e hoş geldiniz. Bağlanılıyor...</div>
+
+        <div id="messages">
+            <!-- Dinamik mesajlar buraya -->
+            <div class="msg-row system">
+                <div style="margin: 0 auto; background: #1e293b; padding: 8px 16px; border-radius: 20px; font-size: 12px; color: #94a3b8;">
+                    Sistem Hazır. Konuşmaya başlamak için butona basın.
+                </div>
+            </div>
         </div>
+
         <div class="controls">
-            <button id="micBtn" class="btn btn-mic" disabled>
-                <span>🎤</span> <span id="micText">Başlat</span>
-            </button>
-            <div style="font-size: 12px; color: #8b949e;">VAD (Ses Aktivite) Modu Aktif</div>
+            <div id="statusText" class="status-text">Bekleniyor...</div>
+            <div class="mic-wrapper">
+                <div id="micRipple" class="mic-ripple"></div>
+                <button id="micBtn" class="mic-btn" disabled><i class="fas fa-microphone"></i></button>
+            </div>
         </div>
     </div>
 
-    <div class="panel" style="flex: 1;">
-        <div class="panel-header">
-            <span>📟 Telemetry Log</span>
-            <button onclick="document.getElementById('log-area').innerHTML=''" style="background:none; border:none; color:#8b949e; cursor:pointer;">Clear</button>
+    <div class="telemetry-zone">
+        <div class="logs-header">
+            <span>LIVE TELEMETRY</span>
+            <span style="cursor:pointer" onclick="document.getElementById('logs').innerHTML=''">CLEAR</span>
         </div>
-        <div id="log-area"></div>
+        <div id="logs"></div>
     </div>
+</div>
 
-    <script src="js/app.js"></script>
+<script src="js/app.js"></script>
 </body>
 </html>
