@@ -36,6 +36,7 @@ volumes:
   tts-mms-cache:
   tts-mms-history:
 
+
 services:
   redis:
     <<: *common-settings
@@ -50,8 +51,8 @@ services:
       test: [ "CMD", "redis-cli", "ping" ]
 
   # --- AI SERVİSLERİ (HYBRID CONFIG) ---
-  
-  # 1. STT: CPU (Stability First)
+
+
   stt-whisper-service:
     <<: *common-settings
     image: ghcr.io/sentiric/sentiric-stt-whisper-service:latest-gpu
@@ -63,21 +64,51 @@ services:
       - stt-whisper-models:/models
     environment:
       - ENV=development
+      - STT_WHISPER_SERVICE_LOG_LEVEL=info # Debug kapalı, temiz log      
       - STT_WHISPER_SERVICE_HOST=stt-whisper-service
       - STT_WHISPER_SERVICE_HTTP_PORT=15030
       - STT_WHISPER_SERVICE_GRPC_PORT=15031
-      
-      # CPU MODE (VRAM Tasarrufu)
-      - STT_WHISPER_SERVICE_DEVICE=cpu
-      - STT_WHISPER_SERVICE_COMPUTE_TYPE=float32
-      - STT_WHISPER_SERVICE_MODEL_FILENAME=ggml-base.bin
-      
+
+      # # CPU MODE (VRAM Tasarrufu)
+      # - STT_WHISPER_SERVICE_DEVICE=cpu
+      # - STT_WHISPER_SERVICE_COMPUTE_TYPE=float32
+      # - STT_WHISPER_SERVICE_MODEL_FILENAME=ggml-base.bin
+
+      # GPU MODE 
+      - STT_WHISPER_SERVICE_DEVICE=cuda
+
+      # İhtiyaç,                                        Önerilen Dosya,               Boyut
+      # En iyi genel performans (Hızlı ve Kaliteli),    ggml-large-v3-turbo.bin,      1.62 GB  
+      # Düşük RAM'li bir bilgisayarınız varsa           ggml-large-v3-turbo-q8_0.bin  0.874 GB
+      # Düşük RAM'li bir bilgisayarınız varsa           ggml-large-v3-turbo-q5_0.bin  0.574 GB          
+      # En yüksek hassasiyet (Yavaş ama Kesin),         ggml-large-v3.bin,            3.10 GB      
+      # --------------------------------------------------
+      - STT_WHISPER_SERVICE_MODEL_FILENAME=ggml-large-v3-turbo-q5_0.bin
+
       # Tuning
-      - STT_WHISPER_SERVICE_VAD_THRESHOLD=0.5
       - STT_WHISPER_SERVICE_VAD_MS_SILENCE_TO_PROMPT=500
+      # dil
       - STT_WHISPER_SERVICE_LANGUAGE=tr
-      - STT_WHISPER_SERVICE_LOG_LEVEL=info # Debug kapalı, temiz log
-      
+      # 1. Log Probability: Daha sıkı yaptık (-0.6 -> -0.7)
+      - STT_WHISPER_SERVICE_LOGPROB_THRESHOLD=-0.7
+      # 2. No Speech Threshold: Sessizlik olasılığı (%90 -> %85 biraz gevşettik ki VAD yakalasın)
+      - STT_WHISPER_SERVICE_NO_SPEECH_THRESHOLD=0.85
+        # 3. [KRİTİK] VAD Eşiği (Silero):
+        # Gürültüden kaçınmak için 0.65 -> 0.75 yaptık.
+      - STT_WHISPER_SERVICE_VAD_THRESHOLD=0.75
+        # 4. [KRİTİK] VAD Min Duration:
+        # 200ms (Click/Pop sesleri) yerine 500ms (En kısa "Evet" bile 400ms sürer).
+      - STT_WHISPER_SERVICE_VAD_MS_MIN_DURATION=500
+      # Konuşma bittikten sonra 400ms daha bekle ki cümle tamamlansın.
+      - STT_WHISPER_SERVICE_VAD_MS_SPEECH_PAD=400
+
+      # TLS Enabled : chain yada normal crt ile hata alıyor
+      #   E0101 02:33:37.148833793      58 ssl_transport_security.cc:1501]       Handshake failed with fatal error SSL_ERROR_SSL: error:0A00010B:SSL routines::wrong version number.      
+      # - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
+      # - STT_WHISPER_SERVICE_CERT_PATH=/sentiric-certificates/certs/stt-whisper-service-chain.crt
+      # - STT_WHISPER_SERVICE_CERT_PATH=/sentiric-certificates/certs/stt-whisper-service.crt
+      # - STT_WHISPER_SERVICE_KEY_PATH=/sentiric-certificates/certs//stt-whisper-service.key
+
       # TLS Disabled
       - GRPC_TLS_CA_PATH=
       - STT_WHISPER_SERVICE_CERT_PATH=
@@ -91,7 +122,6 @@ services:
       timeout: 10s
       retries: 20
 
-  # 2. LLM: GPU (Speed First)
   llm-llama-service:
     <<: *common-settings
     image: ghcr.io/sentiric/sentiric-llm-llama-service:latest-gpu
@@ -104,18 +134,33 @@ services:
       - llm-llama-loras:/lora_adapters
     environment:
       - ENV=development
+      - LLM_LLAMA_SERVICE_LOG_LEVEL=info
       - LLM_LLAMA_SERVICE_HOST=llm-llama-service
       - LLM_LLAMA_SERVICE_HTTP_PORT=16070
       - LLM_LLAMA_SERVICE_GRPC_PORT=16071
       - LLM_LLAMA_SERVICE_LOG_LEVEL=info
+
+
       
       # GPU MODE (Hızlandırma)
-      - LLM_LLAMA_SERVICE_GPU_LAYERS=100      # Tüm katmanlar GPU'da
-      - LLM_LLAMA_SERVICE_CONTEXT_SIZE=2048   # 6GB VRAM için güvenli limit
-      - LLM_LLAMA_SERVICE_KV_OFFLOAD=true     # Cache GPU'da
-      - LLM_LLAMA_SERVICE_ENABLE_BATCHING=false # Test için batching kapalı
-      
-      # TLS Disabled
+      - LLM_LLAMA_SERVICE_GPU_LAYERS=100 # Tüm katmanlar GPU'da
+      - LLM_LLAMA_SERVICE_CONTEXT_SIZE=2048 # 6GB VRAM için güvenli limit
+      # [CRITICAL FIX] Cache Sorununu Çözme (Her istek taze işlenir)
+      - LLM_LLAMA_SERVICE_KV_OFFLOAD=false  # GPU/CPU arası cache transferini kapat
+      - LLM_LLAMA_SERVICE_USE_MMAP=false    # Dosyayı RAM'e kopyala (Disk cache kullanma)
+      - LLM_LLAMA_SERVICE_ENABLE_BATCHING=false # Batching kapat (Sıralı işle)
+      - LLM_LLAMA_SERVICE_MAX_BATCH_SIZE=1
+      - LLM_LLAMA_SERVICE_THREADS=4
+      - LLM_LLAMA_SERVICE_DEFAULT_TEMPERATURE=0.2
+
+      # TLS Enabbled: chain yada normal crt ile hata alıyor
+      #   E0101 02:35:07.940434698      78 ssl_transport_security.cc:1501]       Handshake failed with fatal error SSL_ERROR_SSL: error:0A00010B:SSL routines::wrong version number.
+      # - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
+      # - LLM_LLAMA_SERVICE_CERT_PATH=/sentiric-certificates/certs/llm-llama-service-chain.crt
+      # - LLM_LLAMA_SERVICE_CERT_PATH=/sentiric-certificates/certs/llm-llama-service.crt
+      # - LLM_LLAMA_SERVICE_KEY_PATH=/sentiric-certificates/certs/llm-llama-service.key
+
+      # TLS Disableds
       - GRPC_TLS_CA_PATH=
       - LLM_LLAMA_SERVICE_CERT_PATH=
       - LLM_LLAMA_SERVICE_KEY_PATH=
@@ -126,37 +171,6 @@ services:
       test: [ "CMD", "curl", "-f", "http://localhost:16070/health" ]
       interval: 30s
       timeout: 5s
-      retries: 20
-
-  # 3. TTS: CPU (Stability First)
-  tts-mms-service:
-    <<: *common-settings
-    image: ghcr.io/sentiric/sentiric-tts-mms-service:latest-gpu
-    build:
-      context: ../sentiric-tts-mms-service
-      dockerfile: Dockerfile
-    volumes:
-      - "${CERTIFICATES_REPO_PATH:-../sentiric-certificates}:/sentiric-certificates:ro"
-      - tts-mms-cache:/app/cache
-    environment:
-      - ENV=development
-      - TTS_MMS_SERVICE_HTTP_PORT=14060
-      - TTS_MMS_SERVICE_GRPC_PORT=14061
-      
-      # CPU MODE
-      - TTS_MMS_SERVICE_DEVICE=cpu
-      
-      # TLS Disabled
-      - GRPC_TLS_CA_PATH=
-      - TTS_MMS_SERVICE_CERT_PATH=
-      - TTS_MMS_SERVICE_KEY_PATH=
-    networks:
-      sentiric-net:
-        ipv4_address: 10.88.40.6
-    healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:14060/health" ]
-      interval: 30s
-      timeout: 10s
       retries: 20
 
   tts-coqui-service:
@@ -171,14 +185,21 @@ services:
       - tts-coqui-models:/root/.local/share/tts
     environment:
       - ENV=development
-      - TTS_COQUI_SERVICE_DEBUG=true
+      - TTS_COQUI_SERVICE_DEBUG=false
       - TTS_COQUI_SERVICE_HTTP_PORT=14030
       - TTS_COQUI_SERVICE_GRPC_PORT=14031
-      
-      # CPU Mode (Backup TTS)
-      - TTS_COQUI_SERVICE_DEVICE=cpu
-      - TTS_COQUI_SERVICE_LOW_RESOURCE_MODE=true
-      
+
+      # CPU Mode
+      # - TTS_COQUI_SERVICE_DEVICE=cpu
+      # - TTS_COQUI_SERVICE_LOW_RESOURCE_MODE=true
+      # GPU Mode
+      - TTS_COQUI_SERVICE_DEVICE=cuda
+
+      # # TLS Enabled
+      # - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
+      # - TTS_COQUI_SERVICE_CERT_PATH=/sentiric-certificates/certs/tts-coqui-service-chain.crt
+      # - TTS_COQUI_SERVICE_KEY_PATH=/sentiric-certificates/certs/tts-coqui-service.key
+
       # TLS Disabled
       - GRPC_TLS_CA_PATH=
       - TTS_COQUI_SERVICE_CERT_PATH=
@@ -191,6 +212,45 @@ services:
       interval: 30s
       timeout: 10s
       retries: 20
+
+  # tts-mms-service:
+  #   <<: *common-settings
+  #   image: ghcr.io/sentiric/sentiric-tts-mms-service:latest-gpu
+  #   build:
+  #     context: ../sentiric-tts-mms-service
+  #     dockerfile: Dockerfile
+  #   volumes:
+  #     - "${CERTIFICATES_REPO_PATH:-../sentiric-certificates}:/sentiric-certificates:ro"
+  #     - tts-mms-cache:/app/cache
+  #   environment:
+  #     - ENV=development
+  #     - TTS_MMS_SERVICE_DEBUG=false
+  #     - TTS_MMS_SERVICE_HTTP_PORT=14060
+  #     - TTS_MMS_SERVICE_GRPC_PORT=14061
+
+  #     # CPU MODE
+  #     # - TTS_MMS_SERVICE_DEVICE=cpu
+
+  #     # GPU MODE
+  #     - TTS_MMS_SERVICE_DEVICE=cuda
+
+  #     # # TLS Enabled
+  #     # - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
+  #     # - TTS_MMS_SERVICE_CERT_PATH=/sentiric-certificates/certs/tts-mms-service-chain.crt
+  #     # - TTS_MMS_SERVICE_KEY_PATH=/sentiric-certificates/certs/tts-mms-service.key
+
+  #     # TLS Disabled
+  #     - GRPC_TLS_CA_PATH=
+  #     - TTS_MMS_SERVICE_CERT_PATH=
+  #     - TTS_MMS_SERVICE_KEY_PATH=
+  #   networks:
+  #     sentiric-net:
+  #       ipv4_address: 10.88.40.6
+  #   healthcheck:
+  #     test: [ "CMD", "curl", "-f", "http://localhost:14060/health" ]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 20
 
   # --- GATEWAY & LOGIC SERVİSLERİ ---
 
@@ -208,6 +268,13 @@ services:
       - LLM_GATEWAY_SERVICE_HTTP_PORT=16020
       - LLM_GATEWAY_SERVICE_GRPC_PORT=16021
       - LLM_LLAMA_SERVICE_GRPC_URL=http://llm-llama-service:16071
+
+      # # TLS Enabled
+      # - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
+      # - LLM_GATEWAY_SERVICE_CERT_PATH=/sentiric-certificates/certs/llm-gateway-service-chain.crt
+      # - LLM_GATEWAY_SERVICE_KEY_PATH=/sentiric-certificates/certs/llm-gateway-service.key
+
+      # TLS Disabled
       - GRPC_TLS_CA_PATH=
       - LLM_GATEWAY_SERVICE_CERT_PATH=
       - LLM_GATEWAY_SERVICE_KEY_PATH=
@@ -239,6 +306,13 @@ services:
       - STT_GATEWAY_SERVICE_GRPC_PORT=15021
       - STT_GATEWAY_SERVICE_METRICS_PORT=15022
       - STT_WHISPER_SERVICE_GRPC_URL=http://stt-whisper-service:15031
+
+      # # TLS Enableds
+      # - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
+      # - STT_GATEWAY_SERVICE_CERT_PATH=/sentiric-certificates/certs/stt-gateway-service-chain.crt
+      # - STT_GATEWAY_SERVICE_KEY_PATH=/sentiric-certificates/certs/stt-gateway-service.key
+
+      # TLS Disabled
       - GRPC_TLS_CA_PATH=
       - STT_GATEWAY_SERVICE_CERT_PATH=
       - STT_GATEWAY_SERVICE_KEY_PATH=
@@ -268,9 +342,17 @@ services:
       - TTS_GATEWAY_SERVICE_GRPC_PORT=14011
       - TTS_COQUI_SERVICE_URL=http://tts-coqui-service:14031
       - TTS_MMS_SERVICE_URL=http://tts-mms-service:14061
+
+      # # TLS Enabled
+      # - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
+      # - TTS_GATEWAY_SERVICE_CERT_PATH=/sentiric-certificates/certs/tts-gateway-service-chain.crt
+      # - TTS_GATEWAY_SERVICE_KEY_PATH=/sentiric-certificates/certs/tts-gateway-service.key
+
+      # TLS Disabled
       - GRPC_TLS_CA_PATH=
       - TTS_GATEWAY_SERVICE_CERT_PATH=
       - TTS_GATEWAY_SERVICE_KEY_PATH=
+
     networks:
       sentiric-net:
         ipv4_address: 10.88.40.1
@@ -297,9 +379,17 @@ services:
       - DIALOG_SERVICE_GRPC_PORT=12061
       - REDIS_URL=redis:6379
       - LLM_GATEWAY_SERVICE_TARGET=llm-gateway-service:16021
+
+      # # TLS Enabled
+      # - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
+      # - DIALOG_SERVICE_CERT_PATH=/sentiric-certificates/certs/dialog-service-chain.crt
+      # - DIALOG_SERVICE_KEY_PATH=/sentiric-certificates/certs/dialog-service.key
+
+      # TLS Disabled
       - GRPC_TLS_CA_PATH=
       - DIALOG_SERVICE_CERT_PATH=
       - DIALOG_SERVICE_KEY_PATH=
+
     networks:
       sentiric-net:
         ipv4_address: 10.88.20.6
@@ -327,10 +417,17 @@ services:
       - STT_GATEWAY_GRPC_URL=http://stt-gateway-service:15021
       - DIALOG_SERVICE_GRPC_URL=http://dialog-service:12061
       - TTS_GATEWAY_GRPC_URL=http://tts-gateway-service:14011
+      - TTS_DEFAULT_VOICE_ID=coqui:default
+
+      # # TLS Enabled
+      # - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
+      # - STREAM_GATEWAY_SERVICE_CERT_PATH=/sentiric-certificates/certs/stream-gateway-service-chain.crt
+      # - STREAM_GATEWAY_SERVICE_KEY_PATH=/sentiric-certificates/certs/stream-gateway-service.key
+
+      # TLS Disabled
       - GRPC_TLS_CA_PATH=
       - STREAM_GATEWAY_SERVICE_CERT_PATH=
       - STREAM_GATEWAY_SERVICE_KEY_PATH=
-      - TTS_DEFAULT_VOICE_ID=mms:tur      
     ports:
       - "18030:18030"
       - "18032:18032"

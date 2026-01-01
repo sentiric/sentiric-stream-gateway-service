@@ -72,7 +72,7 @@ async fn run_session(audio_data: Vec<u8>, is_verification: bool) -> (String, Vec
 
     loop {
         // Genel Timeout (60sn)
-        if start.elapsed() > Duration::from_secs(60) {
+        if start.elapsed() > Duration::from_secs(120) {
             log(session_tag, "❌ ZAMAN AŞIMI (Global Timeout)");
             break; 
         }
