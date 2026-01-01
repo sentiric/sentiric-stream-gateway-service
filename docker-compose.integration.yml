@@ -113,21 +113,17 @@ services:
       - LLM_LLAMA_SERVICE_HTTP_PORT=16070
       - LLM_LLAMA_SERVICE_GRPC_PORT=16071
       
-      # CPU Mode (Stability)
+      # [SAFE MODE] CPU
       - LLM_LLAMA_SERVICE_GPU_LAYERS=0
-      # - LLM_LLAMA_SERVICE_CONTEXT_SIZE=1024
+      - LLM_LLAMA_SERVICE_CONTEXT_SIZE=2048 # 4096 fazla gelebilir, 2048 güvenli
       - LLM_LLAMA_SERVICE_THREADS=4
-
-      # [FIX] Cache sorununu çözmek için KV Offload'ı kapatıyoruz (CPU modunda daha kararlı)
-      - LLM_LLAMA_SERVICE_KV_OFFLOAD=false
       
-      # [FIX] Context size artır
-      - LLM_LLAMA_SERVICE_CONTEXT_SIZE=4096
+      # [CRITICAL FIX] Cache Sorununu Çözme (Her istek taze işlenir)
+      - LLM_LLAMA_SERVICE_KV_OFFLOAD=false  # GPU/CPU arası cache transferini kapat
+      - LLM_LLAMA_SERVICE_USE_MMAP=false    # Dosyayı RAM'e kopyala (Disk cache kullanma)
+      - LLM_LLAMA_SERVICE_ENABLE_BATCHING=false # Batching kapat (Sıralı işle)
       
-      # [FIX] Batching kapat (Test stabilitesi için)
-      - LLM_LLAMA_SERVICE_ENABLE_BATCHING=false     
-      
-      # Insecure
+      # [INSECURE] TLS Devre Dışı
       - GRPC_TLS_CA_PATH=
       - LLM_LLAMA_SERVICE_CERT_PATH=
       - LLM_LLAMA_SERVICE_KEY_PATH=
