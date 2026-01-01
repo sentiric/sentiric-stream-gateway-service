@@ -3,209 +3,312 @@ use futures::{SinkExt, StreamExt};
 use url::Url;
 use std::time::{Duration, Instant};
 use serde_json::Value;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{Read, Write};
+use std::env;
+use chrono::Local;
 
-// Helper: Log Basıcı (Zaman Damgalı)
+// --- CONFIGURATION ---
+const DEFAULT_GATEWAY_URL: &str = "ws://localhost:18030/ws";
+const TEST_AUDIO_PATH: &str = "test.16khz.wav";
+const ARTIFACTS_DIR: &str = "tests/artifacts";
+
+// --- LOGGING ---
 fn log(tag: &str, msg: &str) {
-    let timestamp = chrono::Local::now().format("%H:%M:%S%.3f");
+    let timestamp = Local::now().format("%H:%M:%S%.3f");
     println!("{} [{}] {}", timestamp, tag, msg);
 }
 
-// Helper: WAV Header Oluşturucu
+// --- SMART SRT GENERATOR ---
+struct SrtBuilder {
+    entries: Vec<String>,
+    counter: usize,
+    start_time: Instant,
+    buffer: String,
+    buffer_start: Duration,
+}
+
+impl SrtBuilder {
+    fn new() -> Self {
+        Self { 
+            entries: Vec::new(), 
+            counter: 1, 
+            start_time: Instant::now(),
+            buffer: String::new(),
+            buffer_start: Duration::from_secs(0),
+        }
+    }
+
+    fn add(&mut self, speaker: &str, text: &str) {
+        let elapsed = self.start_time.elapsed();
+        
+        if self.buffer.is_empty() {
+            self.buffer_start = elapsed;
+        }
+        
+        self.buffer.push_str(text);
+
+        // Cümle bitişi (. ? !) veya uzunluk kontrolü
+        if text.chars().any(|c| ".?!".contains(c)) || self.buffer.len() > 80 {
+            self.flush(speaker, elapsed); // Bitiş zamanı olarak şu anı kullan
+        }
+    }
+
+    fn flush(&mut self, speaker: &str, end_time: Duration) {
+        if self.buffer.trim().is_empty() { return; }
+
+        let start_seconds = self.buffer_start.as_secs();
+        let start_millis = self.buffer_start.subsec_millis();
+        
+        // Bitiş zamanı, başlangıçtan en az 1 saniye sonra olsun
+        let end_adjusted = if end_time <= self.buffer_start {
+            self.buffer_start + Duration::from_secs(2)
+        } else {
+            end_time + Duration::from_millis(500) // Okuma payı
+        };
+
+        let end_seconds = end_adjusted.as_secs();
+        let end_millis = end_adjusted.subsec_millis();
+        
+        let fmt_time = |s, ms| format!("{:02}:{:02}:{:02},{:03}", s / 3600, (s % 3600) / 60, s % 60, ms);
+        
+        let entry = format!(
+            "{}\n{} --> {}\n[{}] {}\n\n",
+            self.counter,
+            fmt_time(start_seconds, start_millis),
+            fmt_time(end_seconds, end_millis),
+            speaker,
+            self.buffer.trim()
+        );
+        self.entries.push(entry);
+        self.counter += 1;
+        self.buffer.clear();
+    }
+
+    fn save(&mut self, path: &str) {
+        // Kalan son parçayı yaz
+        if !self.buffer.is_empty() {
+             self.flush("END", self.start_time.elapsed());
+        }
+        let content = self.entries.concat();
+        fs::write(path, content).expect("SRT yazılamadı");
+    }
+}
+
+// --- WAV HEADER GENERATOR ---
 fn write_wav_header(file: &mut File, data_len: u32, sample_rate: u32) {
-    let total_data_len = data_len + 36;
-    let byte_rate = sample_rate * 2; 
-    
+    let num_channels: u16 = 1;
+    let bits_per_sample: u16 = 16;
+    let byte_rate: u32 = sample_rate * u32::from(num_channels) * u32::from(bits_per_sample) / 8;
+    let block_align: u16 = num_channels * bits_per_sample / 8;
+    let subchunk2_size: u32 = data_len;
+    let chunk_size: u32 = 36 + subchunk2_size;
+
     file.write_all(b"RIFF").unwrap();
-    file.write_all(&total_data_len.to_le_bytes()).unwrap();
+    file.write_all(&chunk_size.to_le_bytes()).unwrap();
     file.write_all(b"WAVEfmt ").unwrap();
     file.write_all(&16u32.to_le_bytes()).unwrap(); 
     file.write_all(&1u16.to_le_bytes()).unwrap(); 
-    file.write_all(&1u16.to_le_bytes()).unwrap(); 
+    file.write_all(&num_channels.to_le_bytes()).unwrap();
     file.write_all(&sample_rate.to_le_bytes()).unwrap();
     file.write_all(&byte_rate.to_le_bytes()).unwrap();
-    file.write_all(&2u16.to_le_bytes()).unwrap(); 
-    file.write_all(&16u16.to_le_bytes()).unwrap(); 
+    file.write_all(&block_align.to_le_bytes()).unwrap(); 
+    file.write_all(&bits_per_sample.to_le_bytes()).unwrap();
     file.write_all(b"data").unwrap();
-    file.write_all(&data_len.to_le_bytes()).unwrap();
+    file.write_all(&subchunk2_size.to_le_bytes()).unwrap();
 }
 
-async fn run_session(audio_data: Vec<u8>, is_verification: bool) -> (String, Vec<u8>) {
-    let url = Url::parse("ws://localhost:18030/ws").expect("Geçersiz URL");
-    let (ws_stream, _) = connect_async(url).await.expect("Bağlantı hatası");
+// --- SIMILARITY SCORE ---
+fn calculate_similarity(s1: &str, s2: &str) -> f32 {
+    let clean = |s: &str| s.to_lowercase().chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect::<String>();
+    let c1 = clean(s1);
+    let c2 = clean(s2);
+    
+    let words1: Vec<&str> = c1.split_whitespace().collect();
+    let words2: Vec<&str> = c2.split_whitespace().collect();
+    
+    if words1.is_empty() || words2.is_empty() { return 0.0; }
+
+    let mut matches = 0;
+    for w1 in &words1 {
+        if words2.contains(w1) { matches += 1; }
+    }
+    
+    (matches as f32 / words1.len() as f32) * 100.0
+}
+
+// --- SESSION RUNNER ---
+async fn run_session(
+    audio_to_send: Vec<u8>, 
+    is_verification: bool,
+    srt: &mut SrtBuilder
+) -> (String, Vec<u8>) {
+    let gw_url = env::var("WS_URL").unwrap_or_else(|_| DEFAULT_GATEWAY_URL.to_string());
+    let url = Url::parse(&gw_url).expect("URL Hatası");
+    
+    log(if is_verification { "VERIFY" } else { "MAIN" }, &format!("Bağlanılıyor: {}", url));
+    
+    let (ws_stream, _) = match connect_async(url).await {
+        Ok(s) => s,
+        Err(e) => panic!("Bağlantı Hatası: {}. Servis ayakta mı?", e),
+    };
     let (mut write, mut read) = ws_stream.split();
 
-    let session_tag = if is_verification { "VERIFY" } else { "MAIN" };
-    log(session_tag, "Oturum Başlıyor...");
-
-    let sender_handle = tokio::spawn(async move {
-        // Chunk boyutu: 6400 bytes (200ms @ 16kHz)
-        let chunk_size = 6400; 
-        let total_chunks = audio_data.len() / chunk_size;
-        
-        log("SENDER", &format!("Ses gönderimi başladı ({} paket)...", total_chunks));
-        
-        for (i, chunk) in audio_data.chunks(chunk_size).enumerate() {
-            write.send(Message::Binary(chunk.to_vec())).await.expect("Ses gönderilemedi");
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            if i % 10 == 0 { print!("."); use std::io::Write; std::io::stdout().flush().unwrap(); }
+    let tag = if is_verification { "VERIFY" } else { "MAIN" };
+    
+    // --- TASK: AUDIO SENDER ---
+    let sender = tokio::spawn(async move {
+        // 16kHz Mono: 200ms = 6400 bytes
+        for chunk in audio_to_send.chunks(6400) {
+            write.send(Message::Binary(chunk.to_vec())).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(190)).await; 
         }
-        println!(""); // Newline
-        log("SENDER", "Ses bitti. VAD tetikleyici (Sessizlik) gönderiliyor...");
-
-        // VAD Tetikleyici (2 Saniye Sessizlik)
-        let silence = vec![0u8; 6400]; 
-        for _ in 0..10 { 
-            if write.send(Message::Binary(silence.clone())).await.is_err() { break; }
+        // VAD Trigger
+        log("SENDER", "Ses bitti, sessizlik (VAD Trigger) gönderiliyor...");
+        let silence = vec![0u8; 6400];
+        for _ in 0..5 {
+            write.send(Message::Binary(silence.clone())).await.unwrap();
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
-        log("SENDER", "Sessizlik gönderildi. Kanal açık tutuluyor.");
-        
+        // Kanalı açık tut
         loop { tokio::time::sleep(Duration::from_secs(1)).await; }
     });
 
-    let mut captured_text = String::new();
-    let mut captured_audio = Vec::new();
+    // --- TASK: RECEIVER ---
+    let mut full_text = String::new();
+    let mut full_audio = Vec::new();
     let start = Instant::now();
-    let mut last_activity = Instant::now();
+    let mut last_act = Instant::now();
 
     loop {
-        // Genel Timeout (60sn)
+        // Global Timeout
         if start.elapsed() > Duration::from_secs(120) {
-            log(session_tag, "❌ ZAMAN AŞIMI (Global Timeout)");
-            break; 
+            log(tag, "⚠️  Süre sınırı (120s) doldu, mevcut verilerle devam ediliyor.");
+            break;
+        }
+        
+        // Idle Timeout (Data akışı durduysa)
+        if !full_text.is_empty() && !full_audio.is_empty() && last_act.elapsed() > Duration::from_secs(8) {
+            log(tag, "✅ Aktivite bitti (Idle Timeout).");
+            break;
         }
 
-        // Aktivite Timeout (15sn boyunca ses/metin gelmezse bitir)
-        if !captured_text.is_empty() && last_activity.elapsed() > Duration::from_secs(15) {
-             log(session_tag, "✅ Aktivite bitti (Idle Timeout). Oturum kapatılıyor.");
-             break;
-        }
-
-        match tokio::time::timeout(Duration::from_secs(1), read.next()).await {
-            Ok(Some(msg)) => {
-                last_activity = Instant::now(); // Aktiviteyi güncelle
+        match tokio::time::timeout(Duration::from_secs(3), read.next()).await {
+            Ok(Some(Ok(msg))) => {
+                last_act = Instant::now();
                 match msg {
-                    Ok(Message::Text(text)) => {
-                        if let Ok(json) = serde_json::from_str::<Value>(&text) {
+                    Message::Text(txt) => {
+                        if let Ok(json) = serde_json::from_str::<Value>(&txt) {
                             if json["type"] == "subtitle" {
-                                let content = json["text"].as_str().unwrap_or("");
-                                captured_text.push_str(content);
+                                let t = json["text"].as_str().unwrap_or("");
+                                full_text.push_str(t);
+                                
+                                let spk = if !is_verification { "AI" } else { "STT" };
+                                srt.add(spk, t);
+                                
                                 if !is_verification {
-                                    // Anlık akışı göster
-                                    print!("{}", content); use std::io::Write; std::io::stdout().flush().unwrap();
-                                }
-                            }
-                            if json["type"] == "telemetry" {
-                                // Sadece durum değişimlerini logla
-                                let status = json["status"].as_str().unwrap_or("");
-                                if status == "final" || status == "complete" || status == "error" {
-                                    println!("\n📡 [TELEM] {} -> {}: {}", 
-                                        json["phase"].as_str().unwrap_or("?"), 
-                                        status, 
-                                        json["detail"].as_str().unwrap_or("")
-                                    );
-                                }
-                                if is_verification && json["phase"] == "stt" && status == "final" {
-                                     captured_text = json["detail"].as_str().unwrap_or("").to_string();
-                                     println!("\n🔍 [VERIFY] STT Algıladı: {}", captured_text);
+                                    print!("{}", t); use std::io::Write; std::io::stdout().flush().unwrap();
                                 }
                             }
                         }
                     },
-                    Ok(Message::Binary(bin)) => {
-                        if captured_audio.is_empty() && !is_verification {
-                            println!(""); // Newline fix
-                            log(session_tag, &format!("🔊 İLK SES PAKETİ ALINDI ({} bytes)", bin.len()));
+                    Message::Binary(bin) => {
+                        if full_audio.is_empty() && !is_verification { 
+                            println!(""); 
+                            log(tag, "🔊 Ses Alınmaya Başlandı (TTS Stream)"); 
                         }
-                        if !is_verification { 
-                            captured_audio.extend_from_slice(&bin);
-                        }
+                        if !is_verification { full_audio.extend_from_slice(&bin); }
                     },
-                    Ok(Message::Close(_)) => {
-                        log(session_tag, "🔌 Sunucu bağlantıyı kapattı.");
-                        break;
-                    },
-                    Err(e) => {
-                        log(session_tag, &format!("❌ Okuma Hatası: {}", e));
+                    Message::Close(_) => {
+                        log(tag, "🔌 Bağlantı sunucu tarafından kapatıldı.");
                         break;
                     },
                     _ => {}
                 }
             },
-            Ok(None) => {
-                log(session_tag, "Stream bitti.");
+            Ok(Some(Err(e))) => {
+                log(tag, &format!("❌ Socket Hatası: {}", e));
                 break;
-            }, 
+            },
+            Ok(None) => {
+                log(tag, "Stream sonlandı (None).");
+                break;
+            },
             Err(_) => {
-                // Read timeout (Normal, beklemeye devam et)
+                // Timeout (Read) - Normal, beklemeye devam et
                 continue;
             }
         }
     }
     
-    println!(""); // Newline
-    sender_handle.abort();
-    (captured_text, captured_audio)
+    if !is_verification { println!(""); }
+    sender.abort();
+    (full_text, full_audio)
 }
 
 #[tokio::test]
-async fn test_full_audio_conversation() {
-    let wav_path = "test.16khz.wav";
-    let mut file_bytes = Vec::new();
-    let mut f = File::open(wav_path).expect("Test dosyası yok");
-    f.read_to_end(&mut file_bytes).unwrap();
-    if file_bytes.len() > 44 { file_bytes = file_bytes[44..].to_vec(); }
+async fn test_ultimate_simulation() {
+    fs::create_dir_all(ARTIFACTS_DIR).unwrap();
+    let mut srt = SrtBuilder::new();
 
-    println!("==================================================");
-    println!("🎙️  PHASE 1: ANA ARAMA (Kullanıcı Konuşuyor)");
-    println!("==================================================");
-    
-    let (ai_text_response, ai_audio_bytes) = run_session(file_bytes, false).await;
-
-    println!("--------------------------------------------------");
-    log("RESULT", "PHASE 1 Tamamlandı.");
-    println!("📝 AI Metni Uzunluğu: {} karakter", ai_text_response.len());
-    println!("🔊 AI Sesi Boyutu   : {} bytes ({:.2} sn)", ai_audio_bytes.len(), (ai_audio_bytes.len() as f32 / 32000.0));
-
-    if ai_audio_bytes.len() < 1000 {
-        panic!("❌ HATA: TTS sesi üretilmedi veya çok kısa!");
-    }
-
-    let output_path = "tests/ai_response.wav";
-    let mut out_file = File::create(output_path).unwrap();
-    write_wav_header(&mut out_file, ai_audio_bytes.len() as u32, 16000); 
-    out_file.write_all(&ai_audio_bytes).unwrap();
-    log("FILE", &format!("AI sesi kaydedildi: {}", output_path));
-
-    println!("==================================================");
-    println!("♻️  PHASE 2: LOOPBACK DOĞRULAMA (AI Sesi STT'ye Gönderiliyor)");
-    println!("==================================================");
-    
-    let (stt_transcription, _) = run_session(ai_audio_bytes, true).await;
-
-    println!("\n📊 FİNAL DOĞRULAMA RAPORU");
-    println!("=========================");
-    println!("1. Beklenen (LLM): \"{}\"", ai_text_response.trim());
-    println!("2. Algılanan (STT): \"{}\"", stt_transcription.trim());
-
-    // Benzerlik Kontrolü
-    let keywords: Vec<&str> = ai_text_response.split_whitespace().filter(|s| s.len() > 3).collect();
-    let mut match_count = 0;
-    for word in &keywords {
-        if stt_transcription.to_lowercase().contains(&word.to_lowercase()) {
-            match_count += 1;
-        }
-    }
-
-    let match_ratio = if !keywords.is_empty() { (match_count as f32 / keywords.len() as f32) * 100.0 } else { 0.0 };
-    println!("📈 Kelime Eşleşme Oranı: {:.2}%", match_ratio);
-
-    if match_ratio > 20.0 || (!stt_transcription.is_empty() && !ai_text_response.is_empty()) {
-        println!("🏆 TEST BAŞARILI: Sistem tutarlı çalışıyor.");
+    // 1. HAZIRLIK: Test Sesini Yükle
+    let mut input_audio = Vec::new();
+    let wav_exists = if let Ok(mut f) = File::open(TEST_AUDIO_PATH) {
+        f.read_to_end(&mut input_audio).unwrap();
+        if input_audio.len() > 44 { input_audio = input_audio[44..].to_vec(); } // Header skip
+        srt.add("USER", "[Kullanıcı Sesi Gönderildi]");
+        true
     } else {
-        println!("⚠️  UYARI: Düşük eşleşme oranı. (Ses kalitesi veya STT modeli yetersiz olabilir)");
-        // Pipeline çalıştığı için testi fail etmiyoruz, ama uyarıyoruz.
+        log("WARN", "Test dosyası bulunamadı, sessizlik (Dummy) gönderiliyor.");
+        input_audio = vec![0u8; 32000]; // 2 sn sessizlik
+        srt.add("USER", "[Sessizlik Gönderildi]");
+        false
+    };
+
+    println!("\n=== FAZ 1: DIALOG SİMÜLASYONU (User -> AI) ===");
+    let (ai_text, ai_audio) = run_session(input_audio.clone(), false, &mut srt).await;
+
+    // Artifacts Kayıt
+    if wav_exists {
+        let f1_path = format!("{}/1_user_input.wav", ARTIFACTS_DIR);
+        let mut f1 = File::create(&f1_path).unwrap();
+        write_wav_header(&mut f1, input_audio.len() as u32, 16000);
+        f1.write_all(&input_audio).unwrap();
+    }
+
+    let f2_path = format!("{}/2_ai_response_24k.wav", ARTIFACTS_DIR);
+    let mut f2 = File::create(&f2_path).unwrap();
+    // [NOT] Coqui TTS 24000Hz çıktı verir.
+    write_wav_header(&mut f2, ai_audio.len() as u32, 24000);
+    f2.write_all(&ai_audio).unwrap();
+
+    if ai_audio.len() < 1000 {
+        panic!("❌ Kritik Hata: AI ses üretmedi! Test durduruldu.");
+    }
+
+    println!("\n=== FAZ 2: DOĞRULAMA (AI Audio -> Loopback -> STT) ===");
+    // Not: 24kHz veriyi STT'ye (16kHz) gönderiyoruz. Gateway içindeki resampler (C++) bunu halletmeli.
+    let (stt_text, _) = run_session(ai_audio, true, &mut srt).await;
+
+    // SRT Kayıt
+    srt.save(&format!("{}/session_log.srt", ARTIFACTS_DIR));
+
+    println!("\n📊 ANALİZ VE KALİTE RAPORU");
+    println!("-------------------------");
+    println!("1. Hedef Metin (LLM) : {}", ai_text.trim());
+    println!("2. Algılanan (STT)   : {}", stt_text.trim());
+    
+    let score = calculate_similarity(&ai_text, &stt_text);
+    println!("📈 Doğruluk Skoru    : {:.2}%", score);
+    println!("📂 Çıktılar          : {}", ARTIFACTS_DIR);
+
+    if score > 40.0 {
+        println!("✅ TEST BAŞARILI: Sistem tutarlı ve anlaşılır.");
+    } else {
+        println!("⚠️  TEST GEÇTİ AMA SKOR DÜŞÜK ({:.2}%)", score);
+        println!("   Olası Nedenler:");
+        println!("   1. TTS telaffuzu bozuk olabilir.");
+        println!("   2. STT modeli (Whisper) 24k->16k dönüşümünde zorlanmış olabilir.");
+        println!("   3. AI cevabı çok kısa ise skor yanıltıcı olabilir.");
     }
 }

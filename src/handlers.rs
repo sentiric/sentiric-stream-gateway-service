@@ -11,7 +11,6 @@ use uuid::Uuid;
 use metrics::{counter, increment_gauge, decrement_gauge};
 use crate::clients::GrpcClients;
 use tonic::metadata::MetadataValue;
-// FIX: Eksik trait eklendi
 use std::str::FromStr;
 
 // Contracts
@@ -43,6 +42,59 @@ fn create_telemetry(phase: &str, status: &str, detail: &str) -> Message {
     Message::Text(json.to_string())
 }
 
+// YENİ: Cümle Tamponlama Yardımcısı
+struct SentenceBuffer {
+    buffer: String,
+}
+
+impl SentenceBuffer {
+    fn new() -> Self {
+        Self { buffer: String::new() }
+    }
+
+    // Metni ekler ve tamamlanmış cümleleri döndürür
+    fn push_and_extract(&mut self, text: &str) -> Option<String> {
+        self.buffer.push_str(text);
+        
+        // Basit noktalama kontrolü (Daha gelişmiş NLP gerekebilir ama şimdilik yeterli)
+        // Eğer cümlenin sonunda noktalama varsa, o ana kadarki kısmı kesip döndür.
+        if let Some(idx) = self.buffer.rfind(|c| ".?!:;".contains(c)) {
+            // İndeks + 1 yaparak noktalama işaretini de dahil ediyoruz
+            let complete_sentence = self.buffer[..=idx].to_string();
+            // Kalan kısmı buffer'da tut
+            self.buffer = self.buffer[idx+1..].to_string();
+            
+            // Eğer cümle çok kısaysa (örn: "A.") bir sonrakiyle birleşmesini bekle (opsiyonel)
+            if complete_sentence.trim().len() < 2 {
+                // Geri al (Basitlik için şimdilik direk gönderiyoruz)
+                // self.buffer = complete_sentence + &self.buffer;
+                // return None;
+            }
+            
+            return Some(complete_sentence);
+        }
+        
+        // Eğer buffer çok şişerse (noktalama gelmezse) zorla gönder (Latency koruması)
+        if self.buffer.len() > 200 {
+             let chunk = self.buffer.clone();
+             self.buffer.clear();
+             return Some(chunk);
+        }
+
+        None
+    }
+    
+    // Kalan son parçayı al
+    fn flush(&mut self) -> Option<String> {
+        if self.buffer.trim().is_empty() {
+            return None;
+        }
+        let chunk = self.buffer.clone();
+        self.buffer.clear();
+        Some(chunk)
+    }
+}
+
 async fn handle_socket(socket: WebSocket, clients: Arc<GrpcClients>) {
     let session_id = Uuid::new_v4().to_string();
     info!("📱 New Stream Connection. Session: {}", session_id);
@@ -60,7 +112,7 @@ async fn handle_socket(socket: WebSocket, clients: Arc<GrpcClients>) {
 
     let _ = ws_sender.send(create_telemetry("gateway", "connected", &format!("Session: {}", session_id))).await;
 
-    // --- 1. STT LOOP (Trace ID Added) ---
+    // --- 1. STT LOOP ---
     let mut stt_client = clients.stt.clone();
     let tx_dialog_in_clone = tx_dialog_in.clone();
     let tx_ws_out_stt = tx_ws_out.clone();
@@ -108,7 +160,7 @@ async fn handle_socket(socket: WebSocket, clients: Arc<GrpcClients>) {
         }
     });
 
-    // --- 2. DIALOG LOOP (Trace ID Added) ---
+    // --- 2. DIALOG LOOP ---
     let mut dialog_client = clients.dialog.clone();
     let tts_client = clients.tts.clone();
     let tx_ws_out_dialog = tx_ws_out.clone();
@@ -130,6 +182,9 @@ async fn handle_socket(socket: WebSocket, clients: Arc<GrpcClients>) {
             request.metadata_mut().insert("x-trace-id", meta_val);
         }
 
+        // [GÜNCELLEME] Cümle Tamponu
+        let mut sentence_buffer = SentenceBuffer::new();
+
         match dialog_client.stream_conversation(request).await {
             Ok(response) => {
                 let mut inbound = response.into_inner();
@@ -138,49 +193,79 @@ async fn handle_socket(socket: WebSocket, clients: Arc<GrpcClients>) {
                         Ok(dialog_resp) => {
                             match dialog_resp.payload {
                                 Some(stream_conversation_response::Payload::TextResponse(text)) => {
-                                    // [FIX] Log Kirliliğini Önleme: Sadece boş olmayan ve uzun metinleri veya cümle sonlarını logla
-                                    if text.len() > 1 || text.chars().last().map_or(false, |c| ".!?".contains(c)) {
-                                         info!("Dialog Partial Response: {}", text);
-                                    }
-                                    // info!("Dialog Response: {}", text);
-                                    let _ = tx_ws_out_dialog.send(create_telemetry("llm", "response", &text)).await;
-
+                                    // 1. Text'i ham olarak WebSocket'e gönder (Altyazı için anlık akış gerekir)
                                     let json = serde_json::json!({ "type": "subtitle", "text": text });
                                     let _ = tx_ws_out_dialog.send(Message::Text(json.to_string())).await;
 
-                                    let tts_req = SynthesizeStreamRequest {
-                                        text: text.clone(),
-                                        text_type: TextType::Text as i32, 
-                                        voice_id: voice_id.clone(), 
-                                        audio_config: None,
-                                        preferred_provider: "auto".to_string(),
-                                        prosody: None,
-                                    };
-                                    
-                                    let mut t_client = tts_client.clone();
-                                    let tx_out = tx_ws_out_dialog.clone();
-                                    let sid = session_id_dialog.clone();
-                                    
-                                    tokio::spawn(async move {
-                                        let _ = tx_out.send(create_telemetry("tts", "processing", "Synthesizing audio...")).await;
-                                        let mut req = tonic::Request::new(tts_req);
-                                        if let Ok(mv) = MetadataValue::from_str(&sid) {
-                                            req.metadata_mut().insert("x-trace-id", mv);
-                                        }
+                                    // 2. Text'i TTS için tamponla
+                                    if let Some(complete_sentence) = sentence_buffer.push_and_extract(&text) {
+                                        info!("TTS Generating Sentence: '{}'", complete_sentence);
+                                        let _ = tx_ws_out_dialog.send(create_telemetry("llm", "sentence_complete", &complete_sentence)).await;
+                                        
+                                        // TTS İsteği (Asenkron)
+                                        let tts_req = SynthesizeStreamRequest {
+                                            text: complete_sentence,
+                                            text_type: TextType::Text as i32, 
+                                            voice_id: voice_id.clone(), 
+                                            audio_config: None,
+                                            preferred_provider: "auto".to_string(),
+                                            prosody: None,
+                                        };
+                                        
+                                        let mut t_client = tts_client.clone();
+                                        let tx_out = tx_ws_out_dialog.clone();
+                                        let sid = session_id_dialog.clone();
+                                        
+                                        tokio::spawn(async move {
+                                            let mut req = tonic::Request::new(tts_req);
+                                            if let Ok(mv) = MetadataValue::from_str(&sid) {
+                                                req.metadata_mut().insert("x-trace-id", mv);
+                                            }
 
-                                        if let Ok(tts_res) = t_client.synthesize_stream(req).await {
-                                            let mut tts_stream = tts_res.into_inner();
-                                            while let Some(audio_res) = tts_stream.next().await {
-                                                if let Ok(chunk) = audio_res {
-                                                    let _ = tx_out.send(Message::Binary(chunk.audio_content)).await;
+                                            match t_client.synthesize_stream(req).await {
+                                                Ok(tts_res) => {
+                                                    let mut tts_stream = tts_res.into_inner();
+                                                    while let Some(audio_res) = tts_stream.next().await {
+                                                        if let Ok(chunk) = audio_res {
+                                                            let _ = tx_out.send(Message::Binary(chunk.audio_content)).await;
+                                                        }
+                                                    }
+                                                },
+                                                Err(e) => {
+                                                     warn!("TTS Error: {}", e);
                                                 }
                                             }
-                                            let _ = tx_out.send(create_telemetry("tts", "complete", "Audio stream finished")).await;
-                                        } else {
-                                            let _ = tx_out.send(create_telemetry("tts", "error", "Service unreachable")).await;
-                                            warn!("TTS Service unreachable");
-                                        }
-                                    });
+                                        });
+                                    }
+                                },
+                                // LLM Cevabı bittiğinde, tamponda kalan son parçayı da gönder
+                                Some(stream_conversation_response::Payload::IsFinalResponse(_)) => {
+                                     if let Some(remaining) = sentence_buffer.flush() {
+                                        info!("TTS Flushing Remaining: '{}'", remaining);
+                                        // Kod tekrarı olmaması için burayı fonksiyonlaştırabiliriz ama şimdilik copy-paste
+                                        let tts_req = SynthesizeStreamRequest {
+                                            text: remaining,
+                                            text_type: TextType::Text as i32, 
+                                            voice_id: voice_id.clone(), 
+                                            audio_config: None,
+                                            preferred_provider: "auto".to_string(),
+                                            prosody: None,
+                                        };
+                                        let mut t_client = tts_client.clone();
+                                        let tx_out = tx_ws_out_dialog.clone();
+                                        let sid = session_id_dialog.clone();
+                                        tokio::spawn(async move {
+                                            let mut req = tonic::Request::new(tts_req);
+                                            if let Ok(mv) = MetadataValue::from_str(&sid) { req.metadata_mut().insert("x-trace-id", mv); }
+                                            if let Ok(tts_res) = t_client.synthesize_stream(req).await {
+                                                let mut tts_stream = tts_res.into_inner();
+                                                while let Some(audio_res) = tts_stream.next().await {
+                                                    if let Ok(chunk) = audio_res { let _ = tx_out.send(Message::Binary(chunk.audio_content)).await; }
+                                                }
+                                                let _ = tx_out.send(create_telemetry("tts", "complete", "Final audio chunk")).await;
+                                            }
+                                        });
+                                     }
                                 },
                                 _ => {}
                             }
