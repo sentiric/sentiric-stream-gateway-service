@@ -8,8 +8,6 @@ use serde_json::Value;
 async fn test_full_pipeline_connection() {
     // 1. Gateway'e Bağlan
     // Not: Bu testin çalışması için docker compose up ile servisin ayakta olması gerekir.
-    // CI ortamında servis ve test aynı ağda değilse localhost çalışmayabilir.
-    // Ancak local geliştirme için localhost:18030 uygundur.
     let url = Url::parse("ws://localhost:18030/ws").expect("Geçersiz URL");
     println!("🔌 Bağlanılıyor: {}", url);
 
@@ -35,8 +33,9 @@ async fn test_full_pipeline_connection() {
     write.send(text_msg).await.expect("Mesaj gönderilemedi");
     println!("📤 'Merhaba' metni gönderildi.");
 
-    // 3. Yanıt Bekleme (Timeout ile)
-    let timeout = tokio::time::sleep(Duration::from_secs(15)); // Süreyi biraz artırdık
+    // 3. Yanıt Bekleme (Timeout Artırıldı: 60sn)
+    // LLM Cold Start veya CPU inference durumlarında 15sn yetersiz kalabilir.
+    let timeout = tokio::time::sleep(Duration::from_secs(60)); 
     tokio::pin!(timeout);
 
     let mut audio_received = false;
@@ -50,13 +49,16 @@ async fn test_full_pipeline_connection() {
                         println!("📥 Text Alındı: {}", text);
                         if let Ok(json) = serde_json::from_str::<Value>(&text) {
                             if json["type"] == "subtitle" {
-                                println!("✅ Altyazı doğrulandı.");
+                                println!("✅ Altyazı doğrulandı: {}", json["text"]);
                                 subtitle_received = true;
                             }
                         }
                     },
                     Some(Ok(Message::Binary(bin))) => {
-                        println!("📥 Audio Chunk Alındı: {} bytes", bin.len());
+                        // Sadece ilk chunk'ı logla ki ekran dolmasın
+                        if !audio_received {
+                            println!("📥 Audio Chunk Alındı (İlk): {} bytes", bin.len());
+                        }
                         if bin.len() > 0 {
                             audio_received = true;
                         }
@@ -70,21 +72,19 @@ async fn test_full_pipeline_connection() {
                 }
             }
             _ = &mut timeout => {
-                println!("⏰ Zaman aşımı! Test sonlandırılıyor.");
+                println!("⏰ Zaman aşımı (60sn)! Test sonlandırılıyor.");
                 break;
             }
         }
 
-        // Eğer hem ses hem metin aldıysak test başarılıdır
+        // Eğer hem ses hem metin aldıysak test başarılıdır ve erken bitirilebilir
         if audio_received && subtitle_received {
             println!("🎉 TEST BAŞARILI: Hem metin yanıtı hem ses akışı alındı.");
             return;
         }
     }
     
-    // NOT: Tam entegrasyon testi için arkadaki servislerin (Dialog, TTS) de çalışıyor olması gerekir.
-    // Eğer sadece Gateway test ediliyorsa ve arkası boşsa bu test fail edebilir, bu beklenen bir durumdur.
     if !subtitle_received && !audio_received {
-        println!("⚠️ Uyarı: Yanıt alınamadı. Arkadaki servisler (Dialog/TTS) çalışıyor mu?");
+        panic!("❌ HATA: Yanıt alınamadı. Servis zincirinde bir kopukluk veya zaman aşımı var.");
     }
 }
