@@ -143,7 +143,7 @@ services:
 
       
       # GPU MODE (Hızlandırma)
-      - LLM_LLAMA_SERVICE_GPU_LAYERS=100 # Tüm katmanlar GPU'da
+      - LLM_LLAMA_SERVICE_GPU_LAYERS=0 # Tüm katmanlar GPU'da
       - LLM_LLAMA_SERVICE_CONTEXT_SIZE=2048 # 6GB VRAM için güvenli limit
       # [CRITICAL FIX] Cache Sorununu Çözme (Her istek taze işlenir)
       - LLM_LLAMA_SERVICE_KV_OFFLOAD=false  # GPU/CPU arası cache transferini kapat
