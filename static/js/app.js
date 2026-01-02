@@ -306,7 +306,7 @@ class SentiricApp {
             }
         } else {
             this.state.isRecording = false;
-            this.state.workletNode.disconnect();
+            if (this.state.workletNode) this.state.workletNode.disconnect();
             this.ui.btn.className = "mic-btn";
             this.ui.ring.classList.remove('active');
             this.setStatus("Durduruldu", "neutral");
