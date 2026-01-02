@@ -144,16 +144,25 @@ services:
       - "${ASSETS_REPO_PATH:-../sentiric-assets}/docs/audio/speakers:/app/speakers"
       - tts-coqui-models:/root/.local/share/tts
     environment:
+      # --- GLOBAL --
       - ENV=development
       - TTS_COQUI_SERVICE_DEBUG=false
+
+      # -- NETWORK ---
       - TTS_COQUI_SERVICE_HTTP_PORT=14030
       - TTS_COQUI_SERVICE_GRPC_PORT=14031
+
+      # --- ---
       - TTS_COQUI_SERVICE_DEVICE=cuda
-      
+
+      # ---
+      - TTS_COQUI_SERVICE_DEFAULT_SPEAKER=F_TR_Parlak_Zeynep/neutral
+
       # [SECURITY - mTLS ENABLED]
       - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
       - TTS_COQUI_SERVICE_CERT_PATH=/sentiric-certificates/certs/tts-coqui-service-chain.crt
       - TTS_COQUI_SERVICE_KEY_PATH=/sentiric-certificates/certs/tts-coqui-service.key
+
     networks:
       sentiric-net:
         ipv4_address: 10.88.40.3
@@ -326,7 +335,7 @@ services:
       - DIALOG_SERVICE_GRPC_URL=https://dialog-service:12061
       - TTS_GATEWAY_GRPC_URL=https://tts-gateway-service:14011
       
-      - TTS_DEFAULT_VOICE_ID=coqui:default
+      - TTS_DEFAULT_VOICE_ID=coqui:F_TR_Parlak_Zeynep/neutral
 
       # [SECURITY - mTLS Client Config]
       - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
