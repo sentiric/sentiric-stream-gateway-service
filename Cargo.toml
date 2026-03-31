@@ -1,10 +1,11 @@
 [package]
 name = "sentiric-stream-gateway-service"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 authors = ["Sentiric Architecture Team"]
-description = "Nano-Edge compatible Stream Gateway for Sentiric Platform"
+description = "Nano-Edge compatible Stream Gateway with GitHub Actions CD"
 
+# Bağımlılıklar v1.0.1 ile aynı kalıyor...
 [dependencies]
 # Async & Web
 tokio = { version = "1.36", features = ["full"] }
