@@ -1,19 +1,18 @@
 # --- Builder Stage ---
-# Rust 1.85 Edition 2024 desteği için zorunludur
 FROM rust:1.85-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y \
-    pkg-config \
-    libssl-dev \
-    protobuf-compiler \
-    git \
+    pkg-config libssl-dev protobuf-compiler git \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Dependency Caching
+# [DEPENDENCY FIX]: Agresif crate güncellemelerini Rust 1.85 sınırında mühürle
 COPY Cargo.toml ./
-RUN mkdir src && echo "fn main() {}" > src/main.rs && cargo build --release && rm -rf src
+RUN mkdir src && echo "fn main() {}" > src/main.rs \
+    && cargo update -p time --precise 0.3.36 \
+    && cargo build --release \
+    && rm -rf src
 
 # Final Build
 COPY . .
