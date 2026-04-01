@@ -1,35 +1,26 @@
-# --- Builder Stage ---
-FROM rust:1.85-slim-bookworm AS builder
+# --- STAGE 1: Builder ---
+FROM rust:1.93-slim-bookworm AS builder
 
-RUN apt-get update && apt-get install -y \
-    pkg-config libssl-dev protobuf-compiler git \
+RUN apt-get update && \
+    apt-get install -y git pkg-config libssl-dev protobuf-compiler curl && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY . .
+RUN cargo build --release --bin sentiric-stream-gateway-service
+
+# --- STAGE 2: Final ---
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates netcat-openbsd curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-
-# [DEPENDENCY FIX]: Agresif crate güncellemelerini Rust 1.85 sınırında mühürle
-COPY Cargo.toml ./
-RUN mkdir src && echo "fn main() {}" > src/main.rs \
-    && cargo update -p time --precise 0.3.36 \
-    && cargo build --release \
-    && rm -rf src
-
-# Final Build
-COPY . .
-RUN cargo build --release
-
-# --- Final Stage ---
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
-
-RUN useradd -u 1001 -ms /bin/bash sentiric
-USER sentiric
-WORKDIR /home/sentiric
-
 COPY --from=builder /app/target/release/sentiric-stream-gateway-service .
 
-ENV RUST_LOG=info
-ENV LOG_FORMAT=json
-EXPOSE 18030
+RUN useradd -m -u 1001 appuser
+USER appuser
 
+ENV RUST_LOG=info
 ENTRYPOINT ["./sentiric-stream-gateway-service"]
