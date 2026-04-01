@@ -2,25 +2,41 @@ mod app;
 mod config;
 mod pubsub;
 mod server;
+mod telemetry; // [ARCH-COMPLIANCE FIX] Eklendi
 
 use crate::app::AppState;
+use crate::telemetry::SutsFormatter;
 use axum::{routing::get, Router};
 use std::io::Write;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::signal;
-use tracing::{info, Level};
-use tracing_subscriber::FmtSubscriber; // EKLENDİ
+use tracing::info;
+use tracing_subscriber::{fmt, prelude::*, EnvFilter, Registry}; // [ARCH-COMPLIANCE FIX] Değiştirildi
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // EKLENDİ
-    let subscriber = FmtSubscriber::builder()
-        .json()
-        .with_max_level(Level::INFO)
-        .with_current_span(false)
-        .with_span_list(false)
-        .finish();
-    tracing::subscriber::set_global_default(subscriber).expect("Setting default subscriber failed");
+    // [ARCH-COMPLIANCE FIX] Config yüklemesi, telemetry başlatılmadan ÖNCE yapılmalıdır.
+    let config = match config::AppConfig::load() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = writeln!(std::io::stderr(), "{{\"schema_v\":\"1.0.0\",\"severity\":\"FATAL\",\"event\":\"CONFIG_ERROR\",\"message\":\"{}\"}}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // [ARCH-COMPLIANCE FIX] SUTS v4.0 Formatter Başlatılıyor
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let suts_formatter = SutsFormatter::new(
+        "stream-gateway-service".to_string(),
+        env!("CARGO_PKG_VERSION").to_string(),
+        config.env.clone(),
+        config.tenant_id.clone(),
+    );
+
+    let subscriber = Registry::default()
+        .with(env_filter)
+        .with(fmt::layer().event_format(suts_formatter));
+    tracing::subscriber::set_global_default(subscriber).expect("Failed to set tracing subscriber");
 
     let worker_threads: usize = std::env::var("WORKER_THREADS")
         .unwrap_or_else(|_| "2".to_string())
@@ -34,15 +50,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("Failed building the Runtime");
 
     runtime.block_on(async {
-        let config = match config::AppConfig::load() {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!(event="CONFIG_LOAD_FAIL", error=%e, "Config yüklenemedi!");
-                // [KRİTİK FIX]: Log tamponunu es geç
-                let _ = writeln!(std::io::stderr(), "{{\"schema_v\":\"1.0.0\",\"severity\":\"FATAL\",\"event\":\"CONFIG_ERROR\",\"message\":\"{}\"}}", e);
-                std::process::exit(1);
-            }
-        };
         let port = config.port;
         let tenant_id = config.tenant_id.clone();
 

@@ -2,6 +2,7 @@ use std::env;
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
+    pub env: String,
     pub port: u16,
     pub tenant_id: String,
     pub stt_gateway_url: String,
@@ -15,7 +16,6 @@ pub struct AppConfig {
 
 impl AppConfig {
     pub fn load() -> Result<Self, String> {
-        // [FIX]: Artık panic yerine Result dönüyor
         let tenant_id = env::var("TENANT_ID").unwrap_or_default();
         if tenant_id.trim().is_empty() {
             return Err("[ARCH-COMPLIANCE] TENANT_ID is MANDATORY.".into());
@@ -42,6 +42,7 @@ impl AppConfig {
             .map_err(|_| "[ARCH-COMPLIANCE] STREAM_GATEWAY_SERVICE_KEY_PATH missing.")?;
 
         Ok(Self {
+            env: env::var("ENV").unwrap_or_else(|_| "production".to_string()),
             port: env::var("STREAM_GATEWAY_SERVICE_HTTP_PORT")
                 .unwrap_or_else(|_| "18030".to_string())
                 .parse()

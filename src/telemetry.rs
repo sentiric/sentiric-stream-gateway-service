@@ -1,0 +1,144 @@
+use chrono::Utc;
+use serde::Serialize;
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::fmt;
+use tracing::{Event, Subscriber};
+use tracing_subscriber::fmt::{format::Writer, FmtContext, FormatEvent, FormatFields};
+use tracing_subscriber::registry::LookupSpan;
+
+#[derive(Serialize)]
+struct SutsLogRecord<'a> {
+    schema_v: &'static str,
+    ts: String,
+    severity: String,
+    tenant_id: String,
+    resource: ResourceContext,
+    trace_id: Option<String>,
+    span_id: Option<String>,
+    event: String,
+    message: String,
+    attributes: HashMap<String, Value>,
+    #[serde(skip)]
+    _marker: std::marker::PhantomData<&'a ()>,
+}
+
+#[derive(Serialize, Clone)]
+struct ResourceContext {
+    #[serde(rename = "service.name")]
+    service_name: String,
+    #[serde(rename = "service.version")]
+    service_version: String,
+    #[serde(rename = "service.env")]
+    service_env: String,
+    #[serde(rename = "host.name")]
+    host_name: String,
+}
+
+pub struct SutsFormatter {
+    resource: ResourceContext,
+    tenant_id: String,
+}
+
+impl SutsFormatter {
+    pub fn new(service_name: String, version: String, env: String, tenant_id: String) -> Self {
+        let host_name = hostname::get()
+            .map(|h| h.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
+        Self {
+            resource: ResourceContext {
+                service_name,
+                service_version: version,
+                service_env: env,
+                host_name,
+            },
+            tenant_id,
+        }
+    }
+}
+
+impl<S, N> FormatEvent<S, N> for SutsFormatter
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &Event<'_>,
+    ) -> fmt::Result {
+        let ts = Utc::now().to_rfc3339();
+        let severity = match *event.metadata().level() {
+            tracing::Level::ERROR => "ERROR",
+            tracing::Level::WARN => "WARN",
+            tracing::Level::INFO => "INFO",
+            tracing::Level::DEBUG | tracing::Level::TRACE => "DEBUG",
+        }
+        .to_string();
+
+        let mut visitor = JsonVisitor::default();
+        event.record(&mut visitor);
+
+        let event_name = visitor
+            .fields
+            .remove("event")
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| "LOG_EVENT".to_string());
+        let message = visitor
+            .fields
+            .remove("message")
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(String::new);
+        let trace_id = visitor
+            .fields
+            .remove("trace_id")
+            .and_then(|v| v.as_str().map(String::from));
+        let span_id = ctx
+            .lookup_current()
+            .map(|span| format!("{:016x}", span.id().into_u64()));
+
+        let record = SutsLogRecord {
+            schema_v: "1.0.0",
+            ts,
+            severity,
+            tenant_id: self.tenant_id.clone(),
+            resource: self.resource.clone(),
+            trace_id,
+            span_id,
+            event: event_name,
+            message,
+            attributes: visitor.fields,
+            _marker: std::marker::PhantomData,
+        };
+
+        if let Ok(json) = serde_json::to_string(&record) {
+            writeln!(writer, "{}", json)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct JsonVisitor {
+    fields: HashMap<String, Value>,
+}
+impl tracing::field::Visit for JsonVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
+        self.fields.insert(
+            field.name().to_string(),
+            Value::String(format!("{:?}", value)),
+        );
+    }
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.fields
+            .insert(field.name().to_string(), Value::String(value.to_string()));
+    }
+    fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+        self.fields
+            .insert(field.name().to_string(), Value::Bool(value));
+    }
+    fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+        self.fields.insert(field.name().to_string(), json!(value));
+    }
+}
