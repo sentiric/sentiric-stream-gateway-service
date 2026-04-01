@@ -1,3 +1,4 @@
+// File: sentiric-stream-gateway-service/src/pubsub/ghost_publisher.rs
 #![allow(dead_code)]
 use lapin::{options::*, BasicProperties, Connection, ConnectionProperties};
 use serde_json::Value;
@@ -7,6 +8,9 @@ use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 use tracing::{error, info, warn};
 
+const MAX_BUFFER_CAPACITY: usize = 1000;
+const MAX_BACKOFF_SECS: u64 = 60;
+
 #[derive(Clone)]
 pub struct GhostPublisher {
     buffer: Arc<Mutex<VecDeque<(String, Value)>>>,
@@ -14,9 +18,8 @@ pub struct GhostPublisher {
 
 impl GhostPublisher {
     pub fn new(rabbitmq_url: String, tenant_id: String) -> Self {
-        // Hata Düzeltme: VecDeque tipini açıkça belirtiyoruz (str size hatasını engellemek için)
         let buffer: Arc<Mutex<VecDeque<(String, Value)>>> =
-            Arc::new(Mutex::new(VecDeque::with_capacity(1000)));
+            Arc::new(Mutex::new(VecDeque::with_capacity(MAX_BUFFER_CAPACITY)));
         let buffer_clone = buffer.clone();
 
         tokio::spawn(async move {
@@ -29,10 +32,14 @@ impl GhostPublisher {
                 }
             }
 
+            let mut backoff = 1; // [ARCH-COMPLIANCE] Exponential backoff
+
             loop {
                 match Connection::connect(&rabbitmq_url, ConnectionProperties::default()).await {
                     Ok(conn) => {
-                        info!(event="MQ_CONNECTED", tenant_id=%tenant_id, "Connected to RabbitMQ. Draining buffer...");
+                        backoff = 1; // Reset backoff on success
+                        info!(event="MQ_CONNECTED", tenant_id=%tenant_id, "Connected to RabbitMQ. Draining Ghost Buffer...");
+
                         if let Ok(channel) = conn.create_channel().await {
                             loop {
                                 let msg = {
@@ -54,10 +61,13 @@ impl GhostPublisher {
                                         .await;
 
                                     if res.is_err() {
-                                        buffer_clone
-                                            .lock()
-                                            .await
-                                            .push_front((routing_key, payload));
+                                        // [ARCH-COMPLIANCE] OOM Prevention on re-insertion
+                                        let mut b = buffer_clone.lock().await;
+                                        if b.len() >= MAX_BUFFER_CAPACITY {
+                                            warn!(event="GHOST_BUFFER_FULL_DISCARD", tenant_id=%tenant_id, "Ring buffer full. Dropping oldest unpublishable message.");
+                                        } else {
+                                            b.push_front((routing_key, payload));
+                                        }
                                         break;
                                     }
                                 } else {
@@ -71,10 +81,13 @@ impl GhostPublisher {
                         }
                     }
                     Err(e) => {
-                        error!(event="MQ_CONNECT_FAIL", tenant_id=%tenant_id, error=%e, "RabbitMQ connection failed. Ghost Mode buffering...");
+                        error!(event="MQ_CONNECT_FAIL", tenant_id=%tenant_id, backoff_secs=backoff, error=%e, "RabbitMQ connection failed. Ghost Mode buffering...");
                     }
                 }
-                sleep(Duration::from_secs(10)).await;
+
+                // [ARCH-COMPLIANCE] Thundering Herd Prevention
+                sleep(Duration::from_secs(backoff)).await;
+                backoff = std::cmp::min(backoff * 2, MAX_BACKOFF_SECS);
             }
         });
 
@@ -83,7 +96,7 @@ impl GhostPublisher {
 
     pub async fn publish(&self, routing_key: &str, payload: Value) {
         let mut b = self.buffer.lock().await;
-        if b.len() >= 1000 {
+        if b.len() >= MAX_BUFFER_CAPACITY {
             let _ = b.pop_front();
         }
         b.push_back((routing_key.to_string(), payload));
