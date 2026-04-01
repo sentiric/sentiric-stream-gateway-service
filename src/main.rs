@@ -5,14 +5,15 @@ mod server;
 
 use crate::app::AppState;
 use axum::{routing::get, Router};
+use std::io::Write;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tracing::{info, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing_subscriber::FmtSubscriber; // EKLENDİ
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // DEĞİŞİKLİK 1
+    // EKLENDİ
     let subscriber = FmtSubscriber::builder()
         .json()
         .with_max_level(Level::INFO)
@@ -37,27 +38,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(c) => c,
             Err(e) => {
                 tracing::error!(event="CONFIG_LOAD_FAIL", error=%e, "Config yüklenemedi!");
-                return;
+                // [KRİTİK FIX]: Log tamponunu es geç
+                let _ = writeln!(std::io::stderr(), "{{\"schema_v\":\"1.0.0\",\"severity\":\"FATAL\",\"event\":\"CONFIG_ERROR\",\"message\":\"{}\"}}", e);
+                std::process::exit(1);
             }
         };
         let port = config.port;
         let tenant_id = config.tenant_id.clone();
+
         let app_state = Arc::new(AppState::new(config));
 
-        let app = Router::new().route("/healthz", get(server::http::healthz)).route("/ws", get(server::ws_handler::ws_upgrade)).with_state(app_state);
+        let app = Router::new()
+            .route("/healthz", get(server::http::healthz))
+            .route("/ws", get(server::ws_handler::ws_upgrade))
+            .with_state(app_state);
 
         let listener = match TcpListener::bind(format!("0.0.0.0:{}", port)).await {
             Ok(l) => l,
             Err(e) => {
                 tracing::error!(event="PORT_BIND_FAIL", port=port, error=%e, "Port dinlemeye açılamadı!");
-                return;
+                let _ = writeln!(std::io::stderr(), "{{\"schema_v\":\"1.0.0\",\"severity\":\"FATAL\",\"event\":\"PORT_BIND_FAIL\",\"message\":\"{}\"}}", e);
+                std::process::exit(1);
             }
         };
 
-        info!(event = "SERVER_READY", tenant_id = %tenant_id, port = port, "Stream Gateway listening.");
+        info!(
+            event = "SERVER_READY",
+            tenant_id = %tenant_id,
+            port = port,
+            "Stream Gateway listening."
+        );
 
         if let Err(e) = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal(tenant_id)).await {
             tracing::error!(event="SERVER_CRASH", error=%e, "Axum HTTP sunucusu çöktü");
+            let _ = writeln!(std::io::stderr(), "{{\"schema_v\":\"1.0.0\",\"severity\":\"FATAL\",\"event\":\"SERVER_CRASH\",\"message\":\"{}\"}}", e);
+            std::process::exit(1);
         }
     });
 
