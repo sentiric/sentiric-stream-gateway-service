@@ -11,7 +11,8 @@ use tokio::signal;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // DEĞİŞİKLİK 1
     let subscriber = FmtSubscriber::builder()
         .json()
         .with_max_level(Level::INFO)
@@ -32,33 +33,35 @@ fn main() {
         .expect("Failed building the Runtime");
 
     runtime.block_on(async {
-        let config = config::AppConfig::load();
+        let config = match config::AppConfig::load() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(event="CONFIG_LOAD_FAIL", error=%e, "Config yüklenemedi!");
+                return;
+            }
+        };
         let port = config.port;
         let tenant_id = config.tenant_id.clone();
-
         let app_state = Arc::new(AppState::new(config));
 
-        let app = Router::new()
-            .route("/healthz", get(server::http::healthz))
-            .route("/ws", get(server::ws_handler::ws_upgrade))
-            .with_state(app_state);
+        let app = Router::new().route("/healthz", get(server::http::healthz)).route("/ws", get(server::ws_handler::ws_upgrade)).with_state(app_state);
 
-        let listener = TcpListener::bind(format!("0.0.0.0:{}", port))
-            .await
-            .unwrap();
+        let listener = match TcpListener::bind(format!("0.0.0.0:{}", port)).await {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!(event="PORT_BIND_FAIL", port=port, error=%e, "Port dinlemeye açılamadı!");
+                return;
+            }
+        };
 
-        info!(
-            event = "SERVER_READY",
-            tenant_id = %tenant_id,
-            port = port,
-            "Stream Gateway listening."
-        );
+        info!(event = "SERVER_READY", tenant_id = %tenant_id, port = port, "Stream Gateway listening.");
 
-        axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown_signal(tenant_id))
-            .await
-            .unwrap();
+        if let Err(e) = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal(tenant_id)).await {
+            tracing::error!(event="SERVER_CRASH", error=%e, "Axum HTTP sunucusu çöktü");
+        }
     });
+
+    Ok(())
 }
 
 async fn shutdown_signal(tenant_id: String) {
