@@ -26,7 +26,10 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
     // SUTS v4.0 Context Generation
     let trace_id = Uuid::new_v4().to_string();
     let span_id = Uuid::new_v4().to_string();
-    let tenant_id = "default-tenant".to_string();
+
+    // [ARCH-COMPLIANCE FIX]: Multi-tenancy isolation rule enforced. Hardcoded string removed.
+    let tenant_id = config.tenant_id.clone();
+
     let session_id = Uuid::new_v4().to_string();
     let user_id = "stream-client".to_string();
 
@@ -41,7 +44,6 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
     let mut edge_mode_active = false;
     let mut lang_code = "tr-TR".to_string();
 
-    // Handshake
     if let Some(Ok(msg)) = socket.recv().await {
         if let Message::Binary(bin) = msg {
             match StreamSessionRequest::decode(&bin[..]) {
@@ -195,7 +197,6 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                         };
 
                         let mut buf = Vec::new();
-                        // [FIX] Clippy Collapsible If: İki if koşulu && ile tek satıra indirgendi
                         if resp.encode(&mut buf).is_ok()
                             && socket.send(Message::Binary(buf)).await.is_err() {
                             break;
