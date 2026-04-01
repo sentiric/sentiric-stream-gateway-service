@@ -1,211 +1,209 @@
-use crate::app::AppState;
 use axum::{
-    extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
-    },
-    response::IntoResponse,
+    extract::ws::{Message, WebSocket, WebSocketUpgrade},
+    extract::State,
+    response::Response,
 };
-use futures::{sink::SinkExt, stream::StreamExt};
 use prost::Message as ProstMessage;
-use sentiric_ai_pipeline_sdk::{PipelineOrchestrator, SdkConfig};
-use sentiric_contracts::sentiric::stream::v1::stream_session_request::Data as StreamReqData;
-use sentiric_contracts::sentiric::stream::v1::stream_session_response::Data as StreamResData;
-use sentiric_contracts::sentiric::stream::v1::{StreamSessionRequest, StreamSessionResponse};
-use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-pub async fn ws_upgrade(
-    ws: WebSocketUpgrade,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    ws.on_upgrade(|socket| handle_socket(socket, state))
+use sentiric_ai_pipeline_sdk::config::SdkConfig;
+use sentiric_ai_pipeline_sdk::orchestrator::PipelineOrchestrator;
+use sentiric_contracts::sentiric::stream::v1::stream_session_request::Data;
+use sentiric_contracts::sentiric::stream::v1::StreamSessionRequest;
+
+use crate::app::AppState;
+
+pub async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> Response {
+    ws.on_upgrade(move |socket| handle_websocket(socket, state))
 }
 
-async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
-    let session_id = Uuid::new_v4().to_string();
+pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
+    let config = &state.config;
+
+    // SUTS v4.0 Context Generation
     let trace_id = Uuid::new_v4().to_string();
     let span_id = Uuid::new_v4().to_string();
-    let tenant_id = state.config.tenant_id.clone();
+    let tenant_id = "default-tenant".to_string();
+    let session_id = Uuid::new_v4().to_string();
+    let user_id = "stream-client".to_string();
 
     info!(
-        event = "WS_CLIENT_CONNECTED",
+        event = "WS_CONNECTION_ESTABLISHED",
         trace_id = %trace_id,
         span_id = %span_id,
         tenant_id = %tenant_id,
-        "New WebSocket client connected."
+        "New WebSocket connection established for Stream Gateway."
     );
 
-    // 1. Initial Handshake (Config)
-    let config_msg = match socket.next().await {
-        Some(Ok(Message::Binary(bytes))) => match StreamSessionRequest::decode(bytes.as_slice()) {
-            Ok(req) => req,
-            Err(e) => {
-                warn!(
-                    event = "WS_DECODE_FAIL",
-                    trace_id = %trace_id,
-                    error = %e,
-                    "Handshake decode failed"
-                );
-                let _ = socket.close().await;
-                return;
-            }
-        },
-        _ => {
-            let _ = socket.close().await;
-            return;
-        }
-    };
+    let mut edge_mode_active = false;
+    let mut lang_code = "tr-TR".to_string();
 
-    let session_config = match config_msg.data {
-        Some(StreamReqData::Config(cfg)) => cfg,
-        _ => {
-            warn!(
-                event = "WS_MISSING_CONFIG",
-                trace_id = %trace_id,
-                "First message must be config"
-            );
-            let _ = socket.close().await;
-            return;
-        }
-    };
+    // Handshake
+    if let Some(Ok(msg)) = socket.recv().await {
+        if let Message::Binary(bin) = msg {
+            match StreamSessionRequest::decode(&bin[..]) {
+                Ok(req) => {
+                    if let Some(Data::Config(session_config)) = req.data {
+                        edge_mode_active = session_config.edge_mode;
+                        lang_code = session_config.language;
 
-    // 2. Publish Session Started Event (Ghost Mode Supported)
-    state
-        .ghost_publisher
-        .publish(
-            "stream.session.started",
-            json!({
-                "event_type": "stream.session.started",
-                "trace_id": trace_id,
-                "tenant_id": tenant_id,
-                "timestamp": chrono::Utc::now().to_rfc3339(),
-                "payload": {
-                    "session_id": session_id,
-                    "user_id": session_config.token,
-                    "edge_mode": session_config.edge_mode
+                        info!(
+                            event = "SESSION_CONFIG_RECEIVED",
+                            trace_id = %trace_id,
+                            span_id = %span_id,
+                            tenant_id = %tenant_id,
+                            edge_mode = edge_mode_active,
+                            language = %lang_code,
+                            "Session configuration verified and accepted."
+                        );
+                    } else {
+                        error!(
+                            event = "INVALID_FIRST_MESSAGE",
+                            trace_id = %trace_id,
+                            span_id = %span_id,
+                            tenant_id = %tenant_id,
+                            "Protocol Violation: First message MUST be SessionConfig. Dropping connection."
+                        );
+                        let _ = socket.close().await;
+                        return;
+                    }
                 }
-            }),
-        )
-        .await;
+                Err(e) => {
+                    error!(
+                        event = "PROTOBUF_DECODE_ERROR",
+                        trace_id = %trace_id,
+                        span_id = %span_id,
+                        tenant_id = %tenant_id,
+                        error = %e,
+                        "Failed to decode StreamSessionRequest."
+                    );
+                    let _ = socket.close().await;
+                    return;
+                }
+            }
+        }
+    } else {
+        warn!(
+            event = "WS_CONNECTION_DROPPED_EARLY",
+            trace_id = %trace_id,
+            span_id = %span_id,
+            tenant_id = %tenant_id,
+            "Client disconnected before sending SessionConfig."
+        );
+        return;
+    }
 
-    // 3. SDK Orchestration
     let sdk_config = SdkConfig {
-        stt_gateway_url: state.config.stt_gateway_url.clone(),
-        dialog_service_url: state.config.dialog_service_url.clone(),
-        tts_gateway_url: state.config.tts_gateway_url.clone(),
-        tls_ca_path: state.config.tls_ca_path.clone(),
-        tls_cert_path: state.config.tls_cert_path.clone(),
-        tls_key_path: state.config.tls_key_path.clone(),
-        language_code: session_config.language,
-        system_prompt_id: "default".to_string(),
-        tts_voice_id: "default".to_string(),
-        tts_sample_rate: session_config.sample_rate,
+        stt_gateway_url: config.stt_gateway_url.clone(),
+        dialog_service_url: config.dialog_service_url.clone(),
+        tts_gateway_url: config.tts_gateway_url.clone(),
+        tls_ca_path: config.tls_ca_path.clone(),
+        tls_cert_path: config.tls_cert_path.clone(),
+        tls_key_path: config.tls_key_path.clone(),
+        language_code: lang_code,
+        system_prompt_id: "default-stream-prompt".to_string(),
+        tts_voice_id: "coqui:default".to_string(),
+        tts_sample_rate: 24000,
+        edge_mode: edge_mode_active,
     };
 
     let orchestrator = match PipelineOrchestrator::new(sdk_config).await {
         Ok(orch) => orch,
         Err(e) => {
             error!(
-                event = "SDK_INIT_FAIL",
+                event = "ORCHESTRATOR_INIT_FAIL",
                 trace_id = %trace_id,
+                span_id = %span_id,
+                tenant_id = %tenant_id,
                 error = %e,
-                "SDK initialization failed"
+                "Failed to initialize AI Pipeline Orchestrator."
             );
             let _ = socket.close().await;
             return;
         }
     };
 
-    let (tx_sdk_in, rx_sdk_in) = mpsc::channel::<Vec<u8>>(128);
-    let (tx_sdk_out, mut rx_sdk_out) = mpsc::channel::<Vec<u8>>(128);
+    let (rx_audio_tx, rx_audio_rx) = mpsc::channel(128);
+    let (tx_audio_tx, mut tx_audio_rx) = mpsc::channel(128);
 
-    let orch_trace_id = trace_id.clone();
-    let orch_span_id = span_id.clone();
-    let orch_tenant_id = tenant_id.clone();
-    let user_id = session_config.token.clone();
+    let tr_id = trace_id.clone();
+    let sp_id = span_id.clone();
+    let ten_id = tenant_id.clone();
 
-    // Spawn AI SDK Pipeline
     tokio::spawn(async move {
         if let Err(e) = orchestrator
             .run_pipeline(
                 session_id,
                 user_id,
-                orch_trace_id.clone(),
-                orch_span_id,
-                orch_tenant_id,
-                rx_sdk_in,
-                tx_sdk_out,
+                tr_id.clone(),
+                sp_id.clone(),
+                ten_id.clone(),
+                rx_audio_rx,
+                tx_audio_tx,
             )
             .await
         {
             error!(
-                event = "SDK_PIPELINE_ERROR",
-                trace_id = %orch_trace_id,
+                event = "PIPELINE_ERROR",
+                trace_id = %tr_id,
+                span_id = %sp_id,
+                tenant_id = %ten_id,
                 error = %e,
-                "AI Pipeline execution error"
+                "Pipeline orchestrator encountered a fatal error."
             );
         }
     });
 
-    let (mut ws_sender, mut ws_receiver) = socket.split();
-
-    // 4. TX TASK (SDK Audio -> WebSocket Client)
-    let tx_trace_id = trace_id.clone();
-    let mut tx_task = tokio::spawn(async move {
-        while let Some(audio_chunk) = rx_sdk_out.recv().await {
-            let resp = StreamSessionResponse {
-                data: Some(StreamResData::AudioResponse(audio_chunk)),
-            };
-            let mut buf = Vec::new();
-
-            // [CLIPPY FIX]: Collapsed nested if for cleaner performance
-            if resp.encode(&mut buf).is_ok() && ws_sender.send(Message::Binary(buf)).await.is_err()
-            {
-                break;
+    loop {
+        tokio::select! {
+            ws_msg = socket.recv() => {
+                match ws_msg {
+                    Some(Ok(Message::Binary(bin))) => {
+                        if let Ok(req) = StreamSessionRequest::decode(&bin[..]) {
+                            if let Some(Data::AudioChunk(chunk)) = req.data {
+                                if rx_audio_tx.send(chunk).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => {
+                        info!(
+                            event = "WS_CLIENT_DISCONNECTED",
+                            trace_id = %trace_id,
+                            span_id = %span_id,
+                            tenant_id = %tenant_id,
+                            "Client closed the websocket connection."
+                        );
+                        break;
+                    }
+                    _ => {}
+                }
             }
-        }
-        warn!(event = "WS_TX_CLOSED", trace_id = %tx_trace_id, "Outgoing audio stream task ended");
-    });
 
-    // 5. RX TASK (WebSocket Audio -> SDK Input)
-    let rx_trace_id = trace_id.clone();
-    let mut rx_task = tokio::spawn(async move {
-        while let Some(Ok(msg)) = ws_receiver.next().await {
-            if let Message::Binary(bytes) = msg {
-                if let Ok(req) = StreamSessionRequest::decode(bytes.as_slice()) {
-                    if let Some(StreamReqData::AudioChunk(chunk)) = req.data {
-                        if tx_sdk_in.send(chunk).await.is_err() {
+            ai_audio = tx_audio_rx.recv() => {
+                match ai_audio {
+                    Some(chunk) => {
+                        use sentiric_contracts::sentiric::stream::v1::stream_session_response::Data as RespData;
+                        use sentiric_contracts::sentiric::stream::v1::StreamSessionResponse;
+
+                        let resp = StreamSessionResponse {
+                            data: Some(RespData::AudioResponse(chunk))
+                        };
+
+                        let mut buf = Vec::new();
+                        // [FIX] Clippy Collapsible If: İki if koşulu && ile tek satıra indirgendi
+                        if resp.encode(&mut buf).is_ok()
+                            && socket.send(Message::Binary(buf)).await.is_err() {
                             break;
                         }
                     }
+                    None => break,
                 }
             }
         }
-        info!(event = "WS_RX_CLOSED", trace_id = %rx_trace_id, "Incoming audio stream task ended");
-    });
-
-    // Bridge Logic: Select the first task to fail or finish
-    tokio::select! {
-        _ = (&mut tx_task) => rx_task.abort(),
-        _ = (&mut rx_task) => tx_task.abort(),
     }
-
-    // 6. Finalize: Publish Ended Event
-    state
-        .ghost_publisher
-        .publish(
-            "stream.session.ended",
-            json!({
-                "event_type": "stream.session.ended",
-                "trace_id": trace_id,
-                "tenant_id": tenant_id,
-                "timestamp": chrono::Utc::now().to_rfc3339(),
-                "payload": { "reason": "session_terminated" }
-            }),
-        )
-        .await;
 }

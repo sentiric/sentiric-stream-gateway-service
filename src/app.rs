@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use crate::config::AppConfig;
 use crate::pubsub::ghost_publisher::GhostPublisher;
 

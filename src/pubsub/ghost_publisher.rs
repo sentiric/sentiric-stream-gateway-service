@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use lapin::{options::*, BasicProperties, Connection, ConnectionProperties};
 use serde_json::Value;
 use std::collections::VecDeque;
