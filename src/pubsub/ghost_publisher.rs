@@ -26,68 +26,69 @@ impl GhostPublisher {
             if rabbitmq_url.is_empty() {
                 warn!(event="MQ_DISABLED", tenant_id=%tenant_id, "Ghost Mode Active: RabbitMQ URL not provided. Events will be drained in memory.");
                 loop {
-                    sleep(Duration::from_secs(30)).await;
+                    sleep(Duration::from_secs(10)).await;
                     let mut b = buffer_clone.lock().await;
-                    b.clear();
+                    b.clear(); // Sadece RAM'i tüketmesin diye sil
                 }
-            }
+            } else {
+                let mut backoff = 1; // [ARCH-COMPLIANCE] Exponential backoff
 
-            let mut backoff = 1; // [ARCH-COMPLIANCE] Exponential backoff
+                loop {
+                    match Connection::connect(&rabbitmq_url, ConnectionProperties::default()).await
+                    {
+                        Ok(conn) => {
+                            backoff = 1; // Reset backoff on success
+                            info!(event="MQ_CONNECTED", tenant_id=%tenant_id, "Connected to RabbitMQ. Draining Ghost Buffer...");
 
-            loop {
-                match Connection::connect(&rabbitmq_url, ConnectionProperties::default()).await {
-                    Ok(conn) => {
-                        backoff = 1; // Reset backoff on success
-                        info!(event="MQ_CONNECTED", tenant_id=%tenant_id, "Connected to RabbitMQ. Draining Ghost Buffer...");
-
-                        if let Ok(channel) = conn.create_channel().await {
-                            loop {
-                                let msg = {
-                                    let mut b = buffer_clone.lock().await;
-                                    b.pop_front()
-                                };
-
-                                if let Some((routing_key, payload)) = msg {
-                                    let payload_bytes =
-                                        serde_json::to_vec(&payload).unwrap_or_default();
-                                    let res = channel
-                                        .basic_publish(
-                                            "sentiric_events",
-                                            &routing_key,
-                                            BasicPublishOptions::default(),
-                                            payload_bytes.as_slice(),
-                                            BasicProperties::default(),
-                                        )
-                                        .await;
-
-                                    if res.is_err() {
-                                        // [ARCH-COMPLIANCE] OOM Prevention on re-insertion
+                            if let Ok(channel) = conn.create_channel().await {
+                                loop {
+                                    let msg = {
                                         let mut b = buffer_clone.lock().await;
-                                        if b.len() >= MAX_BUFFER_CAPACITY {
-                                            warn!(event="GHOST_BUFFER_FULL_DISCARD", tenant_id=%tenant_id, "Ring buffer full. Dropping oldest unpublishable message.");
-                                        } else {
-                                            b.push_front((routing_key, payload));
+                                        b.pop_front()
+                                    };
+
+                                    if let Some((routing_key, payload)) = msg {
+                                        let payload_bytes =
+                                            serde_json::to_vec(&payload).unwrap_or_default();
+                                        let res = channel
+                                            .basic_publish(
+                                                "sentiric_events",
+                                                &routing_key,
+                                                BasicPublishOptions::default(),
+                                                payload_bytes.as_slice(),
+                                                BasicProperties::default(),
+                                            )
+                                            .await;
+
+                                        if res.is_err() {
+                                            // [ARCH-COMPLIANCE] OOM Prevention on re-insertion
+                                            let mut b = buffer_clone.lock().await;
+                                            if b.len() >= MAX_BUFFER_CAPACITY {
+                                                warn!(event="GHOST_BUFFER_FULL_DISCARD", tenant_id=%tenant_id, "Ring buffer full. Dropping oldest unpublishable message.");
+                                            } else {
+                                                b.push_front((routing_key, payload));
+                                            }
+                                            break;
                                         }
+                                    } else {
+                                        sleep(Duration::from_millis(100)).await;
+                                    }
+
+                                    if conn.status().state() != lapin::ConnectionState::Connected {
                                         break;
                                     }
-                                } else {
-                                    sleep(Duration::from_millis(100)).await;
-                                }
-
-                                if conn.status().state() != lapin::ConnectionState::Connected {
-                                    break;
                                 }
                             }
                         }
+                        Err(e) => {
+                            error!(event="MQ_CONNECT_FAIL", tenant_id=%tenant_id, backoff_secs=backoff, error=%e, "RabbitMQ connection failed. Ghost Mode buffering...");
+                        }
                     }
-                    Err(e) => {
-                        error!(event="MQ_CONNECT_FAIL", tenant_id=%tenant_id, backoff_secs=backoff, error=%e, "RabbitMQ connection failed. Ghost Mode buffering...");
-                    }
-                }
 
-                // [ARCH-COMPLIANCE] Thundering Herd Prevention
-                sleep(Duration::from_secs(backoff)).await;
-                backoff = std::cmp::min(backoff * 2, MAX_BACKOFF_SECS);
+                    // [ARCH-COMPLIANCE] Thundering Herd Prevention
+                    sleep(Duration::from_secs(backoff)).await;
+                    backoff = std::cmp::min(backoff * 2, MAX_BACKOFF_SECS);
+                }
             }
         });
 
