@@ -130,6 +130,7 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
 
     let (rx_audio_tx, rx_audio_rx) = mpsc::channel(128);
     let (tx_audio_tx, mut tx_audio_rx) = mpsc::channel(128);
+    let (interrupt_tx, interrupt_rx) = mpsc::channel(10); // <--- [YENİ] Interrupt Kanalı
 
     let tr_id = trace_id.clone();
     let sp_id = span_id.clone();
@@ -145,17 +146,11 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                 ten_id.clone(),
                 rx_audio_rx,
                 tx_audio_tx,
+                interrupt_rx, // <--- [EKLENDİ]
             )
             .await
         {
-            error!(
-                event = "PIPELINE_ERROR",
-                trace_id = %tr_id,
-                span_id = %sp_id,
-                tenant_id = %ten_id,
-                error = %e,
-                "Pipeline orchestrator encountered a fatal error."
-            );
+            error!(event = "PIPELINE_ERROR", trace_id = %tr_id, error = %e, "Pipeline fatal error.");
         }
     });
 
@@ -165,21 +160,27 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                 match ws_msg {
                     Some(Ok(Message::Binary(bin))) => {
                         if let Ok(req) = StreamSessionRequest::decode(&bin[..]) {
-                            if let Some(Data::AudioChunk(chunk)) = req.data {
-                                if rx_audio_tx.send(chunk).await.is_err() {
-                                    break;
+                            match req.data {
+                                Some(Data::AudioChunk(chunk)) => {
+                                    if rx_audio_tx.send(chunk).await.is_err() { break; }
                                 }
+                                // [YENİ]: Protobuf Control Sinyalini Yakala
+                                Some(Data::Control(ctrl)) => {
+                                    if ctrl.event == 1 { // EVENT_TYPE_INTERRUPT
+                                        info!(
+                                            event = "WS_INTERRUPT_RECEIVED",
+                                            trace_id = %trace_id, span_id = %span_id, tenant_id = %tenant_id,
+                                            "🎙️ Client sent VAD interrupt. Propagating to AI Pipeline."
+                                        );
+                                        let _ = interrupt_tx.try_send(());
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }
                     Some(Ok(Message::Close(_))) | None => {
-                        info!(
-                            event = "WS_CLIENT_DISCONNECTED",
-                            trace_id = %trace_id,
-                            span_id = %span_id,
-                            tenant_id = %tenant_id,
-                            "Client closed the websocket connection."
-                        );
+                        info!(event = "WS_CLIENT_DISCONNECTED", trace_id = %trace_id, "Client closed websocket.");
                         break;
                     }
                     _ => {}
