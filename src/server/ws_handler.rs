@@ -23,21 +23,15 @@ pub async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>
 pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
     let config = &state.config;
 
-    // SUTS v4.0 Context Generation
     let trace_id = Uuid::new_v4().to_string();
     let span_id = Uuid::new_v4().to_string();
-
-    // [ARCH-COMPLIANCE FIX]: Multi-tenancy isolation rule enforced. Hardcoded string removed.
     let tenant_id = config.tenant_id.clone();
-
     let session_id = Uuid::new_v4().to_string();
     let user_id = "stream-client".to_string();
 
     info!(
         event = "WS_CONNECTION_ESTABLISHED",
-        trace_id = %trace_id,
-        span_id = %span_id,
-        tenant_id = %tenant_id,
+        trace_id = %trace_id, span_id = %span_id, tenant_id = %tenant_id,
         "New WebSocket connection established for Stream Gateway."
     );
 
@@ -54,19 +48,14 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
 
                         info!(
                             event = "SESSION_CONFIG_RECEIVED",
-                            trace_id = %trace_id,
-                            span_id = %span_id,
-                            tenant_id = %tenant_id,
-                            edge_mode = edge_mode_active,
-                            language = %lang_code,
+                            trace_id = %trace_id, span_id = %span_id, tenant_id = %tenant_id,
+                            edge_mode = edge_mode_active, language = %lang_code,
                             "Session configuration verified and accepted."
                         );
                     } else {
                         error!(
                             event = "INVALID_FIRST_MESSAGE",
-                            trace_id = %trace_id,
-                            span_id = %span_id,
-                            tenant_id = %tenant_id,
+                            trace_id = %trace_id, span_id = %span_id, tenant_id = %tenant_id,
                             "Protocol Violation: First message MUST be SessionConfig. Dropping connection."
                         );
                         let _ = socket.close().await;
@@ -76,10 +65,7 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                 Err(e) => {
                     error!(
                         event = "PROTOBUF_DECODE_ERROR",
-                        trace_id = %trace_id,
-                        span_id = %span_id,
-                        tenant_id = %tenant_id,
-                        error = %e,
+                        trace_id = %trace_id, span_id = %span_id, tenant_id = %tenant_id, error = %e,
                         "Failed to decode StreamSessionRequest."
                     );
                     let _ = socket.close().await;
@@ -90,9 +76,7 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
     } else {
         warn!(
             event = "WS_CONNECTION_DROPPED_EARLY",
-            trace_id = %trace_id,
-            span_id = %span_id,
-            tenant_id = %tenant_id,
+            trace_id = %trace_id, span_id = %span_id, tenant_id = %tenant_id,
             "Client disconnected before sending SessionConfig."
         );
         return;
@@ -117,10 +101,7 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
         Err(e) => {
             error!(
                 event = "ORCHESTRATOR_INIT_FAIL",
-                trace_id = %trace_id,
-                span_id = %span_id,
-                tenant_id = %tenant_id,
-                error = %e,
+                trace_id = %trace_id, span_id = %span_id, tenant_id = %tenant_id, error = %e,
                 "Failed to initialize AI Pipeline Orchestrator."
             );
             let _ = socket.close().await;
@@ -129,8 +110,8 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
     };
 
     let (rx_audio_tx, rx_audio_rx) = mpsc::channel(128);
-    let (tx_audio_tx, mut tx_audio_rx) = mpsc::channel(128);
-    let (interrupt_tx, interrupt_rx) = mpsc::channel(10); // <--- [YENİ] Interrupt Kanalı
+    let (tx_out_tx, mut tx_out_rx) = mpsc::channel(128);
+    let (interrupt_tx, interrupt_rx) = mpsc::channel(10);
 
     let tr_id = trace_id.clone();
     let sp_id = span_id.clone();
@@ -145,8 +126,8 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                 sp_id.clone(),
                 ten_id.clone(),
                 rx_audio_rx,
-                tx_audio_tx,
-                interrupt_rx, // <--- [EKLENDİ]
+                tx_out_tx,
+                interrupt_rx,
             )
             .await
         {
@@ -164,7 +145,6 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                                 Some(Data::AudioChunk(chunk)) => {
                                     if rx_audio_tx.send(chunk).await.is_err() { break; }
                                 }
-                                // [YENİ]: Protobuf Control Sinyalini Yakala
                                 Some(Data::Control(ctrl)) => {
                                     if ctrl.event == 1 { // EVENT_TYPE_INTERRUPT
                                         info!(
@@ -187,21 +167,36 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                 }
             }
 
-            ai_audio = tx_audio_rx.recv() => {
-                match ai_audio {
-                    Some(chunk) => {
+            ai_event = tx_out_rx.recv() => {
+                match ai_event {
+                    Some(sentiric_ai_pipeline_sdk::PipelineEvent::Audio(chunk)) => {
                         use sentiric_contracts::sentiric::stream::v1::stream_session_response::Data as RespData;
                         use sentiric_contracts::sentiric::stream::v1::StreamSessionResponse;
-
-                        let resp = StreamSessionResponse {
-                            data: Some(RespData::AudioResponse(chunk))
-                        };
-
+                        let resp = StreamSessionResponse { data: Some(RespData::AudioResponse(chunk)) };
                         let mut buf = Vec::new();
-                        if resp.encode(&mut buf).is_ok()
-                            && socket.send(Message::Binary(buf)).await.is_err() {
-                            break;
-                        }
+                        if resp.encode(&mut buf).is_ok() && socket.send(Message::Binary(buf)).await.is_err() { break; }
+                    }
+                    Some(sentiric_ai_pipeline_sdk::PipelineEvent::ClearBuffer) => {
+                        use sentiric_contracts::sentiric::stream::v1::stream_session_response::Data as RespData;
+                        use sentiric_contracts::sentiric::stream::v1::StreamSessionResponse;
+                        let resp = StreamSessionResponse { data: Some(RespData::ClearAudioBuffer(true)) };
+                        let mut buf = Vec::new();
+                        if resp.encode(&mut buf).is_ok() && socket.send(Message::Binary(buf)).await.is_err() { break; }
+                    }
+                    Some(sentiric_ai_pipeline_sdk::PipelineEvent::Transcript(td)) => {
+                        use sentiric_contracts::sentiric::stream::v1::stream_session_response::Data as RespData;
+                        use sentiric_contracts::sentiric::stream::v1::{StreamSessionResponse, TranscriptEvent};
+                        let resp = StreamSessionResponse {
+                            data: Some(RespData::Transcript(TranscriptEvent {
+                                text: td.text,
+                                is_final: td.is_final,
+                                sender: td.sender,
+                                emotion: td.emotion,
+                                gender: td.gender,
+                            }))
+                        };
+                        let mut buf = Vec::new();
+                        if resp.encode(&mut buf).is_ok() && socket.send(Message::Binary(buf)).await.is_err() { break; }
                     }
                     None => break,
                 }

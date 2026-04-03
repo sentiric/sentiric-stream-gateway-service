@@ -1,6 +1,6 @@
 [package]
 name = "sentiric-stream-gateway-service"
-version = "1.1.7"
+version = "1.1.8"
 edition = "2021"
 authors = ["Sentiric Architecture Team"]
 
@@ -10,9 +10,8 @@ axum = { version = "0.7", features = ["ws", "macros", "tokio"] }
 tower-http = { version = "0.5", features = ["fs", "cors", "trace"] }
 futures = "0.3"
 tracing = "0.1"
-# [ARCH-COMPLIANCE FIX] 'registry' feature eklendi
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "registry"] }
-hostname = "0.3" # [ARCH-COMPLIANCE FIX] Host tespiti için eklendi
+hostname = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
 time = "0.3.36" 
 serde = { version = "1.0", features = ["derive"] }
@@ -21,8 +20,9 @@ lapin = "2.3"
 uuid = { version = "1.7", features = ["v4", "fast-rng"] }
 prost = "0.12"
 tonic = { version = "0.11", features = ["tls", "tls-roots"] }
-sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.20.2" }
-sentiric-ai-pipeline-sdk = { git = "https://github.com/sentiric/sentiric-ai-pipeline-sdk.git", tag = "v0.1.7" }
+# v1.20.3 ve v0.1.8'e güncellendi
+sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.20.3" }
+sentiric-ai-pipeline-sdk = { git = "https://github.com/sentiric/sentiric-ai-pipeline-sdk.git", tag = "v0.1.8" }
 
 [profile.release]
 opt-level = 3
