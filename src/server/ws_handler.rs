@@ -23,10 +23,10 @@ pub async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>
 pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
     let config = &state.config;
 
-    let trace_id = Uuid::new_v4().to_string();
+    let mut trace_id = Uuid::new_v4().to_string();
     let span_id = Uuid::new_v4().to_string();
     let tenant_id = config.tenant_id.clone();
-    let session_id = Uuid::new_v4().to_string();
+    let mut session_id = Uuid::new_v4().to_string();
     let user_id = "stream-client".to_string();
 
     info!(
@@ -46,10 +46,19 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                         edge_mode_active = session_config.edge_mode;
                         lang_code = session_config.language;
 
+                        // [ARCH-COMPLIANCE FIX] Session Authority (İstemcinin ID'lerini kabul et)
+                        if !session_config.trace_id.is_empty() {
+                            trace_id = session_config.trace_id.clone();
+                        }
+                        if !session_config.session_id.is_empty() {
+                            session_id = session_config.session_id.clone();
+                        }
+
                         info!(
                             event = "SESSION_CONFIG_RECEIVED",
                             trace_id = %trace_id, span_id = %span_id, tenant_id = %tenant_id,
                             edge_mode = edge_mode_active, language = %lang_code,
+                            session_id = %session_id,
                             "Session configuration verified and accepted."
                         );
                     } else {
@@ -116,11 +125,12 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
     let tr_id = trace_id.clone();
     let sp_id = span_id.clone();
     let ten_id = tenant_id.clone();
+    let sess_id = session_id.clone();
 
     tokio::spawn(async move {
         if let Err(e) = orchestrator
             .run_pipeline(
-                session_id,
+                sess_id,
                 user_id,
                 tr_id.clone(),
                 sp_id.clone(),
