@@ -37,6 +37,7 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
 
     let mut edge_mode_active = false;
     let mut lang_code = "tr-TR".to_string();
+    let mut sample_rate = 16000; // [ARCH-COMPLIANCE FIX] Dinamik Frekans Değişkeni
 
     if let Some(Ok(msg)) = socket.recv().await {
         if let Message::Binary(bin) = msg {
@@ -46,7 +47,11 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                         edge_mode_active = session_config.edge_mode;
                         lang_code = session_config.language;
 
-                        // [ARCH-COMPLIANCE FIX] Session Authority (İstemcinin ID'lerini kabul et)
+                        // [ARCH-COMPLIANCE FIX] İstemci 0'dan büyük bir frekans belirttiyse onu kullan.
+                        if session_config.sample_rate > 0 {
+                            sample_rate = session_config.sample_rate;
+                        }
+
                         if !session_config.trace_id.is_empty() {
                             trace_id = session_config.trace_id.clone();
                         }
@@ -58,7 +63,7 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                             event = "SESSION_CONFIG_RECEIVED",
                             trace_id = %trace_id, span_id = %span_id, tenant_id = %tenant_id,
                             edge_mode = edge_mode_active, language = %lang_code,
-                            session_id = %session_id,
+                            sample_rate = sample_rate, session_id = %session_id,
                             "Session configuration verified and accepted."
                         );
                     } else {
@@ -72,22 +77,14 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                     }
                 }
                 Err(e) => {
-                    error!(
-                        event = "PROTOBUF_DECODE_ERROR",
-                        trace_id = %trace_id, span_id = %span_id, tenant_id = %tenant_id, error = %e,
-                        "Failed to decode StreamSessionRequest."
-                    );
+                    error!(event = "PROTOBUF_DECODE_ERROR", trace_id = %trace_id, error = %e, "Failed to decode StreamSessionRequest.");
                     let _ = socket.close().await;
                     return;
                 }
             }
         }
     } else {
-        warn!(
-            event = "WS_CONNECTION_DROPPED_EARLY",
-            trace_id = %trace_id, span_id = %span_id, tenant_id = %tenant_id,
-            "Client disconnected before sending SessionConfig."
-        );
+        warn!(event = "WS_CONNECTION_DROPPED_EARLY", trace_id = %trace_id, "Client disconnected early.");
         return;
     }
 
@@ -101,18 +98,14 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
         language_code: lang_code,
         system_prompt_id: "default-stream-prompt".to_string(),
         tts_voice_id: "coqui:default".to_string(),
-        tts_sample_rate: 24000,
+        tts_sample_rate: sample_rate, // [ARCH-COMPLIANCE FIX] Scope Hatası Giderildi
         edge_mode: edge_mode_active,
     };
 
     let orchestrator = match PipelineOrchestrator::new(sdk_config).await {
         Ok(orch) => orch,
         Err(e) => {
-            error!(
-                event = "ORCHESTRATOR_INIT_FAIL",
-                trace_id = %trace_id, span_id = %span_id, tenant_id = %tenant_id, error = %e,
-                "Failed to initialize AI Pipeline Orchestrator."
-            );
+            error!(event = "ORCHESTRATOR_INIT_FAIL", trace_id = %trace_id, error = %e, "Failed to init AI Pipeline.");
             let _ = socket.close().await;
             return;
         }
@@ -157,11 +150,6 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                                 }
                                 Some(Data::Control(ctrl)) => {
                                     if ctrl.event == 1 { // EVENT_TYPE_INTERRUPT
-                                        info!(
-                                            event = "WS_INTERRUPT_RECEIVED",
-                                            trace_id = %trace_id, span_id = %span_id, tenant_id = %tenant_id,
-                                            "🎙️ Client sent VAD interrupt. Propagating to AI Pipeline."
-                                        );
                                         let _ = interrupt_tx.try_send(());
                                     }
                                 }
@@ -169,14 +157,10 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                             }
                         }
                     }
-                    Some(Ok(Message::Close(_))) | None => {
-                        info!(event = "WS_CLIENT_DISCONNECTED", trace_id = %trace_id, "Client closed websocket.");
-                        break;
-                    }
+                    Some(Ok(Message::Close(_))) | None => break,
                     _ => {}
                 }
             }
-
             ai_event = tx_out_rx.recv() => {
                 match ai_event {
                     Some(sentiric_ai_pipeline_sdk::PipelineEvent::Audio(chunk)) => {
@@ -198,11 +182,7 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                         use sentiric_contracts::sentiric::stream::v1::{StreamSessionResponse, TranscriptEvent};
                         let resp = StreamSessionResponse {
                             data: Some(RespData::Transcript(TranscriptEvent {
-                                text: td.text,
-                                is_final: td.is_final,
-                                sender: td.sender,
-                                emotion: td.emotion,
-                                gender: td.gender,
+                                text: td.text, is_final: td.is_final, sender: td.sender, emotion: td.emotion, gender: td.gender,
                             }))
                         };
                         let mut buf = Vec::new();
