@@ -179,7 +179,23 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                             "valence_shift": valence_shift,
                             "speaker_id": speaker_id
                         });
+                        // Bu event, Crystalline servisi veya SRE analizleri için RabbitMQ'ya basılır.
                         state.ghost_publisher.publish("acoustic.mood.shifted", payload).await;
+
+                        // [EKLENDİ]: İsteğe bağlı olarak Web UI tarafında da çizdirmek istersen
+                        // bunu Status Update olarak socket üzerinden gönderebiliriz.
+                        use sentiric_contracts::sentiric::stream::v1::stream_session_response::Data as RespData;
+                        use sentiric_contracts::sentiric::stream::v1::StreamSessionResponse;
+                        let status_json = json!({
+                            "type": "MOOD_SHIFT",
+                            "arousal_shift": arousal_shift,
+                            "new_mood": current_mood
+                        }).to_string();
+                        let resp = StreamSessionResponse { data: Some(RespData::StatusUpdate(status_json)) };
+                        let mut buf = Vec::new();
+                        if resp.encode(&mut buf).is_ok() {
+                            let _ = socket.send(Message::Binary(buf)).await;
+                        }
                     }
                     Some(sentiric_ai_pipeline_sdk::PipelineEvent::Audio(chunk)) => {
                         use sentiric_contracts::sentiric::stream::v1::stream_session_response::Data as RespData;
