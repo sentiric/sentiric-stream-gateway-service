@@ -1,8 +1,8 @@
+# Dosya: Cargo.toml
 [package]
 name = "sentiric-stream-gateway-service"
-version = "1.1.11"
+version = "1.1.12"
 edition = "2021"
-authors = ["Sentiric Architecture Team"]
 
 [dependencies]
 tokio = { version = "1.36", features = ["full"] }
@@ -22,8 +22,8 @@ prost = "0.12"
 tonic = { version = "0.11", features = ["tls", "tls-roots"] }
 
 # Dependency Updates for Core Fixes
-sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.20.4" }
-sentiric-ai-pipeline-sdk = { git = "https://github.com/sentiric/sentiric-ai-pipeline-sdk.git", tag = "v0.1.9" }
+sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.20.6" }
+sentiric-ai-pipeline-sdk = { git = "https://github.com/sentiric/sentiric-ai-pipeline-sdk.git", tag = "v0.1.10" }
 
 [profile.release]
 opt-level = 3

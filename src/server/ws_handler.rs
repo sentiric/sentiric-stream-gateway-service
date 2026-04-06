@@ -1,13 +1,15 @@
+// File: src/server/ws_handler.rs
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
     extract::State,
     response::Response,
 };
 use prost::Message as ProstMessage;
+use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
-use uuid::Uuid;
+use uuid::Uuid; // [YENİ] RMQ Event payload'u için
 
 use sentiric_ai_pipeline_sdk::config::SdkConfig;
 use sentiric_ai_pipeline_sdk::orchestrator::PipelineOrchestrator;
@@ -36,8 +38,9 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
     );
 
     let mut edge_mode_active = false;
+    let mut listen_only = false; // [YENİ]
     let mut lang_code = "tr-TR".to_string();
-    let mut sample_rate = 16000; // [ARCH-COMPLIANCE FIX] Dinamik Frekans Değişkeni
+    let mut sample_rate = 16000;
 
     if let Some(Ok(msg)) = socket.recv().await {
         if let Message::Binary(bin) = msg {
@@ -45,9 +48,9 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                 Ok(req) => {
                     if let Some(Data::Config(session_config)) = req.data {
                         edge_mode_active = session_config.edge_mode;
+                        listen_only = session_config.listen_only_mode; // [YENİ]
                         lang_code = session_config.language;
 
-                        // [ARCH-COMPLIANCE FIX] İstemci 0'dan büyük bir frekans belirttiyse onu kullan.
                         if session_config.sample_rate > 0 {
                             sample_rate = session_config.sample_rate;
                         }
@@ -62,16 +65,12 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                         info!(
                             event = "SESSION_CONFIG_RECEIVED",
                             trace_id = %trace_id, span_id = %span_id, tenant_id = %tenant_id,
-                            edge_mode = edge_mode_active, language = %lang_code,
+                            edge_mode = edge_mode_active, listen_only = listen_only, language = %lang_code,
                             sample_rate = sample_rate, session_id = %session_id,
                             "Session configuration verified and accepted."
                         );
                     } else {
-                        error!(
-                            event = "INVALID_FIRST_MESSAGE",
-                            trace_id = %trace_id, span_id = %span_id, tenant_id = %tenant_id,
-                            "Protocol Violation: First message MUST be SessionConfig. Dropping connection."
-                        );
+                        error!(event = "INVALID_FIRST_MESSAGE", trace_id = %trace_id, "Protocol Violation: First message MUST be SessionConfig.");
                         let _ = socket.close().await;
                         return;
                     }
@@ -98,8 +97,9 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
         language_code: lang_code,
         system_prompt_id: "default-stream-prompt".to_string(),
         tts_voice_id: "coqui:default".to_string(),
-        tts_sample_rate: sample_rate, // [ARCH-COMPLIANCE FIX] Scope Hatası Giderildi
+        tts_sample_rate: sample_rate,
         edge_mode: edge_mode_active,
+        listen_only_mode: listen_only, // [YENİ]
     };
 
     let orchestrator = match PipelineOrchestrator::new(sdk_config).await {
@@ -138,6 +138,8 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
         }
     });
 
+    let loop_tr_id = trace_id.clone();
+
     loop {
         tokio::select! {
             ws_msg = socket.recv() => {
@@ -149,7 +151,7 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                                     if rx_audio_tx.send(chunk).await.is_err() { break; }
                                 }
                                 Some(Data::Control(ctrl)) => {
-                                    if ctrl.event == 1 { // EVENT_TYPE_INTERRUPT
+                                    if ctrl.event == 1 {
                                         let _ = interrupt_tx.try_send(());
                                     }
                                 }
@@ -163,6 +165,19 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
             }
             ai_event = tx_out_rx.recv() => {
                 match ai_event {
+                    // [YENİ]: Deep Waters Event Yakalama ve RMQ'ya Fırlatma
+                    Some(sentiric_ai_pipeline_sdk::PipelineEvent::AcousticMoodShifted { previous_mood, current_mood, arousal_shift, valence_shift, speaker_id }) => {
+                        let payload = json!({
+                            "trace_id": loop_tr_id,
+                            "session_id": session_id,
+                            "previous_mood": previous_mood,
+                            "current_mood": current_mood,
+                            "arousal_shift": arousal_shift,
+                            "valence_shift": valence_shift,
+                            "speaker_id": speaker_id
+                        });
+                        state.ghost_publisher.publish("acoustic.mood.shifted", payload).await;
+                    }
                     Some(sentiric_ai_pipeline_sdk::PipelineEvent::Audio(chunk)) => {
                         use sentiric_contracts::sentiric::stream::v1::stream_session_response::Data as RespData;
                         use sentiric_contracts::sentiric::stream::v1::StreamSessionResponse;
@@ -179,10 +194,28 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                     }
                     Some(sentiric_ai_pipeline_sdk::PipelineEvent::Transcript(td)) => {
                         use sentiric_contracts::sentiric::stream::v1::stream_session_response::Data as RespData;
-                        use sentiric_contracts::sentiric::stream::v1::{StreamSessionResponse, TranscriptEvent};
+                        use sentiric_contracts::sentiric::stream::v1::{StreamSessionResponse, TranscriptEvent, WordData};
+
+                        // Kelimeleri dönüştür
+                        let mapped_words: Vec<WordData> = td.words.into_iter().map(|w| WordData {
+                            word: w.word,
+                            start: w.start,
+                            end: w.end,
+                            probability: w.probability,
+                        }).collect();
+
                         let resp = StreamSessionResponse {
                             data: Some(RespData::Transcript(TranscriptEvent {
-                                text: td.text, is_final: td.is_final, sender: td.sender, emotion: td.emotion, gender: td.gender,
+                                text: td.text,
+                                is_final: td.is_final,
+                                sender: td.sender,
+                                emotion: td.emotion,
+                                gender: td.gender,
+                                arousal: td.arousal,
+                                valence: td.valence,
+                                speaker_id: td.speaker_id,
+                                speaker_vec: td.speaker_vec,
+                                words: mapped_words,
                             }))
                         };
                         let mut buf = Vec::new();
