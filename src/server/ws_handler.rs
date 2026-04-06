@@ -151,8 +151,11 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                                     if rx_audio_tx.send(chunk).await.is_err() { break; }
                                 }
                                 Some(Data::Control(ctrl)) => {
-                                    if ctrl.event == 1 {
+                                    if ctrl.event == 1 { // EVENT_TYPE_INTERRUPT (Barge-in)
                                         let _ = interrupt_tx.try_send(());
+                                    } else if ctrl.event == 2 { // [YENİ] EVENT_TYPE_EOS (End of Speech)
+                                        // Cümle bitti, STT tamponunu zorla kapat ve Finalize et!
+                                        let _ = rx_audio_tx.try_send(vec![]);
                                     }
                                 }
                                 _ => {}
