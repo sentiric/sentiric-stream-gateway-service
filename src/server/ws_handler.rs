@@ -40,7 +40,8 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
 
     let mut edge_mode_active = false;
     let mut listen_only = false;
-    let mut speak_only = false; // [YENİ]
+    let mut speak_only = false;
+    let mut chat_only = false; // [YENİ]
     let mut lang_code = "tr-TR".to_string();
     let mut sample_rate = 16000;
 
@@ -51,7 +52,8 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                     if let Some(Data::Config(session_config)) = req.data {
                         edge_mode_active = session_config.edge_mode;
                         listen_only = session_config.listen_only_mode;
-                        speak_only = session_config.speak_only_mode; // [YENİ]
+                        speak_only = session_config.speak_only_mode;
+                        chat_only = session_config.chat_only_mode; // [YENİ]
                         lang_code = session_config.language;
 
                         if session_config.sample_rate > 0 {
@@ -104,6 +106,7 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
         edge_mode: edge_mode_active,
         listen_only_mode: listen_only, // [YENİ]
         speak_only_mode: speak_only,   // [YENİ]
+        chat_only_mode: chat_only,     // [YENİ]
     };
 
     let orchestrator = match PipelineOrchestrator::new(sdk_config).await {
