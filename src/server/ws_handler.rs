@@ -13,6 +13,7 @@ use uuid::Uuid; // [YENİ] RMQ Event payload'u için
 
 use sentiric_ai_pipeline_sdk::config::SdkConfig;
 use sentiric_ai_pipeline_sdk::orchestrator::PipelineOrchestrator;
+use sentiric_ai_pipeline_sdk::PipelineInputEvent; // [EKLENDİ]
 use sentiric_contracts::sentiric::stream::v1::stream_session_request::Data;
 use sentiric_contracts::sentiric::stream::v1::StreamSessionRequest;
 
@@ -38,7 +39,8 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
     );
 
     let mut edge_mode_active = false;
-    let mut listen_only = false; // [YENİ]
+    let mut listen_only = false;
+    let mut speak_only = false; // [YENİ]
     let mut lang_code = "tr-TR".to_string();
     let mut sample_rate = 16000;
 
@@ -48,7 +50,8 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                 Ok(req) => {
                     if let Some(Data::Config(session_config)) = req.data {
                         edge_mode_active = session_config.edge_mode;
-                        listen_only = session_config.listen_only_mode; // [YENİ]
+                        listen_only = session_config.listen_only_mode;
+                        speak_only = session_config.speak_only_mode; // [YENİ]
                         lang_code = session_config.language;
 
                         if session_config.sample_rate > 0 {
@@ -100,6 +103,7 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
         tts_sample_rate: sample_rate,
         edge_mode: edge_mode_active,
         listen_only_mode: listen_only, // [YENİ]
+        speak_only_mode: speak_only,   // [YENİ]
     };
 
     let orchestrator = match PipelineOrchestrator::new(sdk_config).await {
@@ -111,7 +115,8 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
         }
     };
 
-    let (rx_audio_tx, rx_audio_rx) = mpsc::channel(128);
+    // [MİMARİ DÜZELTME]: Kanal tipi PipelineInputEvent yapıldı
+    let (rx_input_tx, rx_input_rx) = mpsc::channel::<PipelineInputEvent>(128);
     let (tx_out_tx, mut tx_out_rx) = mpsc::channel(128);
     let (interrupt_tx, interrupt_rx) = mpsc::channel(10);
 
@@ -128,7 +133,7 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                 tr_id.clone(),
                 sp_id.clone(),
                 ten_id.clone(),
-                rx_audio_rx,
+                rx_input_rx, // [DÜZELTİLDİ]
                 tx_out_tx,
                 interrupt_rx,
             )
@@ -147,15 +152,19 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                     Some(Ok(Message::Binary(bin))) => {
                         if let Ok(req) = StreamSessionRequest::decode(&bin[..]) {
                             match req.data {
+                                // SES GELDİYSE
                                 Some(Data::AudioChunk(chunk)) => {
-                                    if rx_audio_tx.send(chunk).await.is_err() { break; }
+                                    if rx_input_tx.send(PipelineInputEvent::Audio(chunk)).await.is_err() { break; }
+                                }
+                                // [YENİ] METİN GELDİYSE (Megafon veya OmniChat)
+                                Some(Data::TextMessage(text)) => {
+                                    if rx_input_tx.send(PipelineInputEvent::Text(text)).await.is_err() { break; }
                                 }
                                 Some(Data::Control(ctrl)) => {
-                                    if ctrl.event == 1 { // EVENT_TYPE_INTERRUPT (Barge-in)
+                                    if ctrl.event == 1 {
                                         let _ = interrupt_tx.try_send(());
-                                    } else if ctrl.event == 2 { // [YENİ] EVENT_TYPE_EOS (End of Speech)
-                                        // Cümle bitti, STT tamponunu zorla kapat ve Finalize et!
-                                        let _ = rx_audio_tx.try_send(vec![]);
+                                    } else if ctrl.event == 2 {
+                                        let _ = rx_input_tx.try_send(PipelineInputEvent::Audio(vec![]));
                                     }
                                 }
                                 _ => {}
