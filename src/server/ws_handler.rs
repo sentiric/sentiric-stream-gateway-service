@@ -9,11 +9,11 @@ use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
-use uuid::Uuid; // [YENİ] RMQ Event payload'u için
+use uuid::Uuid;
 
 use sentiric_ai_pipeline_sdk::config::SdkConfig;
 use sentiric_ai_pipeline_sdk::orchestrator::PipelineOrchestrator;
-use sentiric_ai_pipeline_sdk::PipelineInputEvent; // [EKLENDİ]
+use sentiric_ai_pipeline_sdk::PipelineInputEvent;
 use sentiric_contracts::sentiric::stream::v1::stream_session_request::Data;
 use sentiric_contracts::sentiric::stream::v1::StreamSessionRequest;
 
@@ -41,7 +41,7 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
     let mut edge_mode_active = false;
     let mut listen_only = false;
     let mut speak_only = false;
-    let mut chat_only = false; // [YENİ]
+    let mut chat_only = false;
     let mut lang_code = "tr-TR".to_string();
     let mut sample_rate = 16000;
 
@@ -53,7 +53,7 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                         edge_mode_active = session_config.edge_mode;
                         listen_only = session_config.listen_only_mode;
                         speak_only = session_config.speak_only_mode;
-                        chat_only = session_config.chat_only_mode; // [YENİ]
+                        chat_only = session_config.chat_only_mode;
                         lang_code = session_config.language;
 
                         if session_config.sample_rate > 0 {
@@ -92,6 +92,32 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
         return;
     }
 
+    // [ARCH-COMPLIANCE FIX]: Billing (Fatura) entegrasyonu için CallStarted event'i RMQ'ya atılır.
+    let call_started = sentiric_contracts::sentiric::event::v1::CallStartedEvent {
+        event_type: "call.started".to_string(),
+        trace_id: trace_id.clone(),
+        call_id: session_id.clone(),
+        from_uri: "web-client".to_string(),
+        to_uri: "ai-pipeline".to_string(),
+        timestamp: Some(prost_types::Timestamp {
+            seconds: chrono::Utc::now().timestamp(),
+            nanos: chrono::Utc::now().timestamp_subsec_nanos() as i32,
+        }),
+        dialplan_resolution: None,
+        media_info: Some(sentiric_contracts::sentiric::event::v1::MediaInfo {
+            caller_rtp_addr: "websocket".to_string(),
+            server_rtp_port: 0,
+        }),
+    };
+
+    let mut buf = Vec::new();
+    if call_started.encode(&mut buf).is_ok() {
+        state
+            .ghost_publisher
+            .publish_protobuf("call.started", buf)
+            .await;
+    }
+
     let sdk_config = SdkConfig {
         stt_gateway_url: config.stt_gateway_url.clone(),
         dialog_service_url: config.dialog_service_url.clone(),
@@ -104,9 +130,9 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
         tts_voice_id: "coqui:default".to_string(),
         tts_sample_rate: sample_rate,
         edge_mode: edge_mode_active,
-        listen_only_mode: listen_only, // [YENİ]
-        speak_only_mode: speak_only,   // [YENİ]
-        chat_only_mode: chat_only,     // [YENİ]
+        listen_only_mode: listen_only,
+        speak_only_mode: speak_only,
+        chat_only_mode: chat_only,
     };
 
     let orchestrator = match PipelineOrchestrator::new(sdk_config).await {
@@ -118,7 +144,6 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
         }
     };
 
-    // [MİMARİ DÜZELTME]: Kanal tipi PipelineInputEvent yapıldı
     let (rx_input_tx, rx_input_rx) = mpsc::channel::<PipelineInputEvent>(128);
     let (tx_out_tx, mut tx_out_rx) = mpsc::channel(128);
     let (interrupt_tx, interrupt_rx) = mpsc::channel(10);
@@ -136,7 +161,7 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                 tr_id.clone(),
                 sp_id.clone(),
                 ten_id.clone(),
-                rx_input_rx, // [DÜZELTİLDİ]
+                rx_input_rx,
                 tx_out_tx,
                 interrupt_rx,
             )
@@ -155,11 +180,9 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                     Some(Ok(Message::Binary(bin))) => {
                         if let Ok(req) = StreamSessionRequest::decode(&bin[..]) {
                             match req.data {
-                                // SES GELDİYSE
                                 Some(Data::AudioChunk(chunk)) => {
                                     if rx_input_tx.send(PipelineInputEvent::Audio(chunk)).await.is_err() { break; }
                                 }
-                                // [YENİ] METİN GELDİYSE (Megafon veya OmniChat)
                                 Some(Data::TextMessage(text)) => {
                                     if rx_input_tx.send(PipelineInputEvent::Text(text)).await.is_err() { break; }
                                 }
@@ -180,7 +203,6 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
             }
             ai_event = tx_out_rx.recv() => {
                 match ai_event {
-                    // [YENİ]: Deep Waters Event Yakalama ve RMQ'ya Fırlatma
                     Some(sentiric_ai_pipeline_sdk::PipelineEvent::AcousticMoodShifted { previous_mood, current_mood, arousal_shift, valence_shift, speaker_id }) => {
                         let payload = json!({
                             "trace_id": loop_tr_id,
@@ -191,11 +213,10 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                             "valence_shift": valence_shift,
                             "speaker_id": speaker_id
                         });
-                        // Bu event, Crystalline servisi veya SRE analizleri için RabbitMQ'ya basılır.
-                        state.ghost_publisher.publish("acoustic.mood.shifted", payload).await;
 
-                        // [EKLENDİ]: İsteğe bağlı olarak Web UI tarafında da çizdirmek istersen
-                        // bunu Status Update olarak socket üzerinden gönderebiliriz.
+                        // [CRITICAL FIX]: 'publish' yerine 'publish_json' kullanılıyor.
+                        state.ghost_publisher.publish_json("acoustic.mood.shifted", payload).await;
+
                         use sentiric_contracts::sentiric::stream::v1::stream_session_response::Data as RespData;
                         use sentiric_contracts::sentiric::stream::v1::StreamSessionResponse;
                         let status_json = json!({
@@ -227,7 +248,6 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                         use sentiric_contracts::sentiric::stream::v1::stream_session_response::Data as RespData;
                         use sentiric_contracts::sentiric::stream::v1::{StreamSessionResponse, TranscriptEvent, WordData};
 
-                        // Kelimeleri dönüştür
                         let mapped_words: Vec<WordData> = td.words.into_iter().map(|w| WordData {
                             word: w.word,
                             start: w.start,
@@ -257,4 +277,26 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
             }
         }
     }
+
+    // [ARCH-COMPLIANCE FIX]: Döngü kırıldığında (kapanış) CallEndedEvent fırlat (Fatura kesimi)
+    let call_ended = sentiric_contracts::sentiric::event::v1::CallEndedEvent {
+        event_type: "call.ended".to_string(),
+        trace_id: trace_id.clone(),
+        call_id: session_id.clone(),
+        timestamp: Some(prost_types::Timestamp {
+            seconds: chrono::Utc::now().timestamp(),
+            nanos: chrono::Utc::now().timestamp_subsec_nanos() as i32,
+        }),
+        reason: "client_disconnected".to_string(),
+    };
+
+    let mut end_buf = Vec::new();
+    if call_ended.encode(&mut end_buf).is_ok() {
+        state
+            .ghost_publisher
+            .publish_protobuf("call.ended", end_buf)
+            .await;
+    }
+
+    tracing::info!(event="WS_SESSION_CLOSED", trace_id=%trace_id, session_id=%session_id, "WebSocket session safely closed and billed.");
 }
