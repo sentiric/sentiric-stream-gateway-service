@@ -92,7 +92,6 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
         return;
     }
 
-    // [ARCH-COMPLIANCE FIX]: Billing (Fatura) entegrasyonu için CallStarted event'i RMQ'ya atılır.
     let call_started = sentiric_contracts::sentiric::event::v1::CallStartedEvent {
         event_type: "call.started".to_string(),
         trace_id: trace_id.clone(),
@@ -203,10 +202,11 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
             }
             ai_event = tx_out_rx.recv() => {
                 match ai_event {
-                    Some(sentiric_ai_pipeline_sdk::PipelineEvent::AcousticMoodShifted { previous_mood, current_mood, arousal_shift, valence_shift, speaker_id }) => {
+                    // [ARCH-COMPLIANCE FIX]: SDK v0.1.16 session_id eklendi
+                    Some(sentiric_ai_pipeline_sdk::PipelineEvent::AcousticMoodShifted { session_id: evt_sess_id, previous_mood, current_mood, arousal_shift, valence_shift, speaker_id }) => {
                         let payload = json!({
                             "trace_id": loop_tr_id,
-                            "session_id": session_id,
+                            "session_id": evt_sess_id,
                             "previous_mood": previous_mood,
                             "current_mood": current_mood,
                             "arousal_shift": arousal_shift,
@@ -214,7 +214,6 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                             "speaker_id": speaker_id
                         });
 
-                        // [CRITICAL FIX]: 'publish' yerine 'publish_json' kullanılıyor.
                         state.ghost_publisher.publish_json("acoustic.mood.shifted", payload).await;
 
                         use sentiric_contracts::sentiric::stream::v1::stream_session_response::Data as RespData;
@@ -278,7 +277,6 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
         }
     }
 
-    // [ARCH-COMPLIANCE FIX]: Döngü kırıldığında (kapanış) CallEndedEvent fırlat (Fatura kesimi)
     let call_ended = sentiric_contracts::sentiric::event::v1::CallEndedEvent {
         event_type: "call.ended".to_string(),
         trace_id: trace_id.clone(),
