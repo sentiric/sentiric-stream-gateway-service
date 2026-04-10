@@ -60,6 +60,10 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                             sample_rate = session_config.sample_rate;
                         }
 
+                        // [ARCH-COMPLIANCE FIX]: Trace ID Merge
+                        // İlk bağlantıda üretilen geçici ID'yi loglayıp, yeni ID'ye (SDK'dan gelen) geçiş yaptığımızı belirtiyoruz.
+                        let temp_trace_id = trace_id.clone();
+
                         if !session_config.trace_id.is_empty() {
                             trace_id = session_config.trace_id.clone();
                         }
@@ -72,7 +76,8 @@ pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
                             trace_id = %trace_id, span_id = %span_id, tenant_id = %tenant_id,
                             edge_mode = edge_mode_active, listen_only = listen_only, language = %lang_code,
                             sample_rate = sample_rate, session_id = %session_id,
-                            "Session configuration verified and accepted."
+                            temp_trace_id = %temp_trace_id, // [YENİ]: Adli bilişim (Forensics) için geçici ID'yi loga ekledik
+                            "Session configuration verified and accepted. Trace bounds merged."
                         );
                     } else {
                         error!(event = "INVALID_FIRST_MESSAGE", trace_id = %trace_id, "Protocol Violation: First message MUST be SessionConfig.");
