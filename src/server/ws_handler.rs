@@ -19,14 +19,32 @@ use sentiric_contracts::sentiric::stream::v1::StreamSessionRequest;
 
 use crate::app::AppState;
 
-pub async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> Response {
-    ws.on_upgrade(move |socket| handle_websocket(socket, state))
+use axum::extract::Query; // [YENİ]
+use std::collections::HashMap; // [YENİ]
+
+pub async fn ws_upgrade(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>, // [YENİ]: URL parametrelerini oku
+) -> Response {
+    // Eğer URL'de trace_id varsa onu kullan, yoksa yeni üret
+    let trace_id = params
+        .get("trace_id")
+        .cloned()
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+    ws.on_upgrade(move |socket| handle_websocket(socket, state, trace_id))
 }
 
-pub async fn handle_websocket(mut socket: WebSocket, state: Arc<AppState>) {
+pub async fn handle_websocket(
+    mut socket: WebSocket,
+    state: Arc<AppState>,
+    initial_trace_id: String,
+) {
+    let mut trace_id = initial_trace_id; // Artık dışarıdan geliyor
     let config = &state.config;
 
-    let mut trace_id = Uuid::new_v4().to_string();
+    // let mut trace_id = Uuid::new_v4().to_string();
     let span_id = Uuid::new_v4().to_string();
     let tenant_id = config.tenant_id.clone();
     let mut session_id = Uuid::new_v4().to_string();
