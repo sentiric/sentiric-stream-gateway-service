@@ -19,15 +19,14 @@ use sentiric_contracts::sentiric::stream::v1::StreamSessionRequest;
 
 use crate::app::AppState;
 
-use axum::extract::Query; // [YENİ]
-use std::collections::HashMap; // [YENİ]
+use axum::extract::Query;
+use std::collections::HashMap;
 
 pub async fn ws_upgrade(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
-    Query(params): Query<HashMap<String, String>>, // [YENİ]: URL parametrelerini oku
+    Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    // Eğer URL'de trace_id varsa onu kullan, yoksa yeni üret
     let trace_id = params
         .get("trace_id")
         .cloned()
@@ -41,10 +40,9 @@ pub async fn handle_websocket(
     state: Arc<AppState>,
     initial_trace_id: String,
 ) {
-    let mut trace_id = initial_trace_id; // Artık dışarıdan geliyor
+    let mut trace_id = initial_trace_id;
     let config = &state.config;
 
-    // let mut trace_id = Uuid::new_v4().to_string();
     let span_id = Uuid::new_v4().to_string();
     let tenant_id = config.tenant_id.clone();
     let mut session_id = Uuid::new_v4().to_string();
@@ -63,6 +61,12 @@ pub async fn handle_websocket(
     let mut lang_code = "tr-TR".to_string();
     let mut sample_rate = 16000;
 
+    // [ARCH-COMPLIANCE FIX]: Dinamik LLM ve TTS Parametreleri
+    let mut final_system_prompt = "PROMPT_SYSTEM_DEFAULT".to_string();
+    let mut final_tts_voice = std::env::var("TTS_DEFAULT_VOICE_ID").unwrap_or_else(|_| {
+        "omnivoice:female, clear, professional, warm, corporate, Turkish".to_string()
+    });
+
     if let Some(Ok(msg)) = socket.recv().await {
         if let Message::Binary(bin) = msg {
             match StreamSessionRequest::decode(&bin[..]) {
@@ -78,8 +82,6 @@ pub async fn handle_websocket(
                             sample_rate = session_config.sample_rate;
                         }
 
-                        // [ARCH-COMPLIANCE FIX]: Trace ID Merge
-                        // İlk bağlantıda üretilen geçici ID'yi loglayıp, yeni ID'ye (SDK'dan gelen) geçiş yaptığımızı belirtiyoruz.
                         let temp_trace_id = trace_id.clone();
 
                         if !session_config.trace_id.is_empty() {
@@ -89,12 +91,20 @@ pub async fn handle_websocket(
                             session_id = session_config.session_id.clone();
                         }
 
+                        // [ARCH-COMPLIANCE FIX]: SDK Overrides
+                        if !session_config.system_prompt_id.is_empty() {
+                            final_system_prompt = session_config.system_prompt_id.clone();
+                        }
+                        if !session_config.tts_voice_id.is_empty() {
+                            final_tts_voice = session_config.tts_voice_id.clone();
+                        }
+
                         info!(
                             event = "SESSION_CONFIG_RECEIVED",
                             trace_id = %trace_id, span_id = %span_id, tenant_id = %tenant_id,
                             edge_mode = edge_mode_active, listen_only = listen_only, language = %lang_code,
                             sample_rate = sample_rate, session_id = %session_id,
-                            temp_trace_id = %temp_trace_id, // [YENİ]: Adli bilişim (Forensics) için geçici ID'yi loga ekledik
+                            temp_trace_id = %temp_trace_id,
                             "Session configuration verified and accepted. Trace bounds merged."
                         );
                     } else {
@@ -148,8 +158,8 @@ pub async fn handle_websocket(
         tls_cert_path: config.tls_cert_path.clone(),
         tls_key_path: config.tls_key_path.clone(),
         language_code: lang_code,
-        system_prompt_id: "default-stream-prompt".to_string(),
-        tts_voice_id: "coqui:default".to_string(),
+        system_prompt_id: final_system_prompt, // DINAMIK
+        tts_voice_id: final_tts_voice,         // DINAMIK
         tts_sample_rate: sample_rate,
         edge_mode: edge_mode_active,
         listen_only_mode: listen_only,
@@ -225,7 +235,6 @@ pub async fn handle_websocket(
             }
             ai_event = tx_out_rx.recv() => {
                 match ai_event {
-                    // [ARCH-COMPLIANCE FIX]: SDK v0.1.16 session_id eklendi
                     Some(sentiric_ai_pipeline_sdk::PipelineEvent::AcousticMoodShifted { session_id: evt_sess_id, previous_mood, current_mood, arousal_shift, valence_shift, speaker_id }) => {
                         let payload = json!({
                             "trace_id": loop_tr_id,
