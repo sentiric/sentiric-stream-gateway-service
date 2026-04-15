@@ -235,19 +235,33 @@ pub async fn handle_websocket(
             }
             ai_event = tx_out_rx.recv() => {
                 match ai_event {
-                    Some(sentiric_ai_pipeline_sdk::PipelineEvent::AcousticMoodShifted { session_id: evt_sess_id, previous_mood, current_mood, arousal_shift, valence_shift, speaker_id }) => {
-                        let payload = json!({
-                            "trace_id": loop_tr_id,
-                            "session_id": evt_sess_id,
-                            "previous_mood": previous_mood,
-                            "current_mood": current_mood,
-                            "arousal_shift": arousal_shift,
-                            "valence_shift": valence_shift,
-                            "speaker_id": speaker_id
-                        });
+                    Some(sentiric_ai_pipeline_sdk::PipelineEvent::AcousticMoodShifted { session_id: evt_sess_id, previous_mood, current_mood, arousal_shift, valence_shift, speaker_id, speaker_vec }) => {
 
-                        state.ghost_publisher.publish_json("acoustic.mood.shifted", payload).await;
+                        // [ARCH-COMPLIANCE FIX]: JSON yerine Strict Protobuf ile RabbitMQ'ya basıyoruz.
+                        use sentiric_contracts::sentiric::event::v1::AcousticMoodShiftedEvent;
 
+                        let shift_event = AcousticMoodShiftedEvent {
+                            event_type: "acoustic.mood.shifted".to_string(),
+                            trace_id: loop_tr_id.clone(),
+                            call_id: evt_sess_id,
+                            timestamp: Some(prost_types::Timestamp {
+                                seconds: chrono::Utc::now().timestamp(),
+                                nanos: chrono::Utc::now().timestamp_subsec_nanos() as i32,
+                            }),
+                            previous_mood,
+                            current_mood: current_mood.clone(),
+                            arousal_shift,
+                            valence_shift,
+                            speaker_id,
+                            speaker_vec, // 8D Vektör Crystalline'e gidiyor!
+                        };
+
+                        let mut buf = Vec::new();
+                        if shift_event.encode(&mut buf).is_ok() {
+                            state.ghost_publisher.publish_protobuf("acoustic.mood.shifted", buf).await;
+                        }
+
+                        // Web İstemcisi (SDK) için Status Update bildirimini JSON string olarak yollamaya devam et
                         use sentiric_contracts::sentiric::stream::v1::stream_session_response::Data as RespData;
                         use sentiric_contracts::sentiric::stream::v1::StreamSessionResponse;
                         let status_json = json!({
