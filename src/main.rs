@@ -2,7 +2,7 @@ mod app;
 mod config;
 mod pubsub;
 mod server;
-mod telemetry; // [ARCH-COMPLIANCE FIX] Eklendi
+mod telemetry;
 
 use crate::app::AppState;
 use crate::telemetry::SutsFormatter;
@@ -12,10 +12,9 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tracing::info;
-use tracing_subscriber::{fmt, prelude::*, EnvFilter, Registry}; // [ARCH-COMPLIANCE FIX] Değiştirildi
+use tracing_subscriber::{fmt, prelude::*, EnvFilter, Registry};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // [ARCH-COMPLIANCE FIX] Config yüklemesi, telemetry başlatılmadan ÖNCE yapılmalıdır.
     let config = match config::AppConfig::load() {
         Ok(c) => c,
         Err(e) => {
@@ -24,7 +23,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // [ARCH-COMPLIANCE FIX] SUTS v4.0 Formatter Başlatılıyor
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let suts_formatter = SutsFormatter::new(
         "stream-gateway-service".to_string(),
@@ -52,8 +50,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     runtime.block_on(async {
         let port = config.port;
         let tenant_id = config.tenant_id.clone();
+        let rmq_url = config.rabbitmq_url.clone();
 
         let app_state = Arc::new(AppState::new(config));
+
+        // [ARCH-COMPLIANCE FIX]: Crystalline'den gelen zihin haritalarını dinleyen tüketiciyi başlat
+        crate::pubsub::consumer::CognitiveConsumer::start(rmq_url, app_state.cognitive_tx.clone()).await;
 
         let app = Router::new()
             .route("/healthz", get(server::http::healthz))
