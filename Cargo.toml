@@ -22,8 +22,8 @@ prost = "0.12"
 prost-types = "0.12"
 tonic = { version = "0.11", features = ["tls", "tls-roots"] }
 
-# [ARCH-COMPLIANCE FIX]: Dependency Drift giderildi. En güncel sözleşmeler.
-sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.23.0" }
+# [ARCH-COMPLIANCE FIX]: Sözleşmeler v1.25.0'a güncellendi (Generative Media Desteği)
+sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.25.0" }
 sentiric-ai-pipeline-sdk = { git = "https://github.com/sentiric/sentiric-ai-pipeline-sdk.git", tag = "v0.1.21" }
 
 [profile.release]

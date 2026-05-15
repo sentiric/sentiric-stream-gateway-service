@@ -1,4 +1,3 @@
-// File: src/server/ws_handler.rs
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
     extract::State,
@@ -25,7 +24,6 @@ use sentiric_contracts::sentiric::stream::v1::{
 
 use crate::app::AppState;
 
-/// WSS Bağlantı Başlatıcı
 pub async fn ws_upgrade(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
@@ -39,7 +37,6 @@ pub async fn ws_upgrade(
     ws.on_upgrade(move |socket| handle_websocket(socket, state, trace_id))
 }
 
-/// DTO: Oturum Context Verilerini taşımak için yapı
 struct SessionContext {
     trace_id: String,
     span_id: String,
@@ -48,7 +45,6 @@ struct SessionContext {
     user_id: String,
 }
 
-/// ANA YÖNETİCİ DÖNGÜ (Spagettiden arındırılmış ve Sahiplik Kurallarına Uyumlu)
 pub async fn handle_websocket(
     mut socket: WebSocket,
     state: Arc<AppState>,
@@ -57,12 +53,9 @@ pub async fn handle_websocket(
     let span_id = Uuid::new_v4().to_string();
     let tenant_id = state.config.tenant_id.clone();
 
-    // İlk mesaj (Config) beklenir
     let session_config = match wait_for_config(&mut socket, &initial_trace_id).await {
         Some(config) => config,
         None => {
-            // [ARCH-COMPLIANCE FIX]: Sahiplik (Ownership) hatası çözüldü.
-            // Kapatma işlemi referans üzerinden değil, soketin asıl sahibi tarafından yapılır.
             let _ = socket.close().await;
             return;
         }
@@ -84,18 +77,11 @@ pub async fn handle_websocket(
         user_id: "stream-client".to_string(),
     };
 
-    info!(
-        event = "WS_CONNECTION_ESTABLISHED",
-        trace_id = %session_ctx.trace_id, span_id = %session_ctx.span_id, tenant_id = %session_ctx.tenant_id, session_id = %session_ctx.session_id,
-        "Session authenticated and ready."
-    );
+    info!(event = "WS_CONNECTION_ESTABLISHED", trace_id = %session_ctx.trace_id, span_id = %session_ctx.span_id, "Session authenticated and ready.");
 
-    // Call Started Olayını RMQ'ya bas
     publish_call_started(&state, &session_ctx).await;
 
-    // AI Pipeline SDK Ayarları
     let sdk_config = build_sdk_config(&state.config, &session_config);
-
     let orchestrator = match PipelineOrchestrator::new(sdk_config).await {
         Ok(orch) => orch,
         Err(e) => {
@@ -109,7 +95,6 @@ pub async fn handle_websocket(
     let (tx_out_tx, mut tx_out_rx) = mpsc::channel(128);
     let (interrupt_tx, interrupt_rx) = mpsc::channel(10);
 
-    // Orchestrator'u bağımsız task'a al
     spawn_orchestrator(
         orchestrator,
         &session_ctx,
@@ -119,36 +104,48 @@ pub async fn handle_websocket(
     );
 
     let mut cognitive_rx = state.cognitive_tx.subscribe();
+    let mut media_rx = state.media_tx.subscribe(); // [YENİ] Media Receiver
 
-    // ⚡ ANA EVENT DÖNGÜSÜ (Yalnızca Helper Fonksiyonları Çağırır)
     loop {
         tokio::select! {
             ws_msg = socket.recv() => {
-                if !process_client_message(ws_msg, &rx_input_tx, &interrupt_tx).await {
-                    break; // İstemci koptu
+                if !process_client_message(ws_msg, &rx_input_tx, &interrupt_tx, &state, &session_ctx).await {
+                    break;
                 }
             }
             cog_event_res = cognitive_rx.recv() => {
                 process_cognitive_map(cog_event_res, &session_ctx.trace_id, &mut socket).await;
             }
+            // [YENİ]: RabbitMQ'dan gelen Video Üretim Sonucunu Tarayıcıya Gönder
+            media_event = media_rx.recv() => {
+                if let Ok(evt) = media_event {
+                    if evt.trace_id == session_ctx.trace_id {
+                        let status_json = serde_json::json!({
+                            "type": "MEDIA_GENERATION",
+                            "success": evt.success,
+                            "media_type": evt.media_type,
+                            "uri": evt.result_uri,
+                            "error_message": evt.error_message
+                        }).to_string();
+                        send_ws_response(&mut socket, RespData::StatusUpdate(status_json)).await;
+                    }
+                }
+            }
             ai_event = tx_out_rx.recv() => {
                 if !process_ai_event(ai_event, &state, &session_ctx, &mut socket).await {
-                    break; // Pipeline bitti veya koptu
+                    break;
                 }
             }
         }
     }
 
-    // Çağrı bitti, soketi güvenli kapat
     publish_call_ended(&state, &session_ctx).await;
     let _ = socket.close().await;
 }
 
-// ====================================================================================
-// YARDIMCI FONKSİYONLAR (HELPER FUNCTIONS) - SOLID PRENSİPLERİ
-// ====================================================================================
+// --- HELPER FUNCTIONS ---
 
-/// İlk mesaja bakar, eğer SessionConfig ise döner. Socket'i kapatma işlemi çağıran fonksiyona aittir.
+// ORIGINAL LOGS RESTORED
 async fn wait_for_config(socket: &mut WebSocket, trace_id: &str) -> Option<SessionConfig> {
     if let Some(Ok(Message::Binary(bin))) = socket.recv().await {
         match StreamSessionRequest::decode(&bin[..]) {
@@ -169,11 +166,12 @@ async fn wait_for_config(socket: &mut WebSocket, trace_id: &str) -> Option<Sessi
     None
 }
 
-/// İstemciden (WSS) gelen ses/metin mesajlarını Pipeline'a yönlendirir.
 async fn process_client_message(
     ws_msg: Option<Result<Message, axum::Error>>,
     rx_input_tx: &mpsc::Sender<PipelineInputEvent>,
     interrupt_tx: &mpsc::Sender<()>,
+    state: &Arc<AppState>,
+    session_ctx: &SessionContext,
 ) -> bool {
     match ws_msg {
         Some(Ok(Message::Binary(bin))) => {
@@ -183,6 +181,36 @@ async fn process_client_message(
                         let _ = rx_input_tx.send(PipelineInputEvent::Audio(chunk)).await;
                     }
                     Some(ReqData::TextMessage(text)) => {
+                        // [YENİ]: Gizli Video Komutu Yakalayıcı (Bypass Pipeline)
+                        if text.starts_with("[CMD:GENERATE_VIDEO]") {
+                            let payload = text.replace("[CMD:GENERATE_VIDEO]", "");
+                            let parts: Vec<&str> = payload.splitn(2, '|').collect();
+                            if parts.len() == 2 {
+                                let model = parts[0].trim().to_string();
+                                let prompt = parts[1].trim().to_string();
+                                let video_cli = state.video_client.clone();
+                                let t_id = session_ctx.trace_id.clone();
+                                let ten_id = session_ctx.tenant_id.clone();
+
+                                tokio::spawn(async move {
+                                    if let Some(mut cli) = video_cli {
+                                        use sentiric_contracts::sentiric::video::v1::SubmitVideoJobRequest;
+                                        let req = tonic::Request::new(SubmitVideoJobRequest {
+                                            tenant_id: ten_id,
+                                            trace_id: t_id,
+                                            prompt,
+                                            preferred_model: model,
+                                            reference_image_uri: None,
+                                            duration_seconds: 5,
+                                            aspect_ratio: "16:9".into(),
+                                            fps: 24,
+                                        });
+                                        let _ = cli.submit_video_job(req).await;
+                                    }
+                                });
+                            }
+                            return true; // Pipeline'a atma, işlemi yut.
+                        }
                         let _ = rx_input_tx.send(PipelineInputEvent::Text(text)).await;
                     }
                     Some(ReqData::Control(ctrl)) => {
@@ -202,7 +230,6 @@ async fn process_client_message(
     }
 }
 
-/// AI Pipeline'dan çıkan sesi/metni alır, WebSockets ve RMQ'ya basar.
 async fn process_ai_event(
     ai_event: Option<PipelineEvent>,
     state: &Arc<AppState>,
@@ -235,7 +262,6 @@ async fn process_ai_event(
                 speaker_id,
                 speaker_vec,
             };
-
             let mut buf = Vec::new();
             if shift_event.encode(&mut buf).is_ok() {
                 state
@@ -243,11 +269,7 @@ async fn process_ai_event(
                     .publish_protobuf("acoustic.mood.shifted", buf)
                     .await;
             }
-
-            let status_json = json!({
-                "type": "MOOD_SHIFT", "arousal_shift": arousal_shift, "new_mood": current_mood
-            })
-            .to_string();
+            let status_json = json!({ "type": "MOOD_SHIFT", "arousal_shift": arousal_shift, "new_mood": current_mood }).to_string();
             send_ws_response(socket, RespData::StatusUpdate(status_json)).await;
             true
         }
@@ -268,7 +290,6 @@ async fn process_ai_event(
                     probability: w.probability,
                 })
                 .collect();
-
             let t_event = TranscriptEvent {
                 text: td.text,
                 is_final: td.is_final,
@@ -287,7 +308,6 @@ async fn process_ai_event(
     }
 }
 
-/// Crystalline'den broadcast edilen Zihin Haritalarını dinler ve doğru WebSocket'e yollar.
 async fn process_cognitive_map(
     cog_event_res: Result<CognitiveMapUpdatedEvent, tokio::sync::broadcast::error::RecvError>,
     trace_id: &str,
@@ -300,7 +320,6 @@ async fn process_cognitive_map(
     }
 }
 
-/// Sockets'e veri basan jenerik yardımcı
 async fn send_ws_response(socket: &mut WebSocket, data: RespData) -> bool {
     let resp = StreamSessionResponse { data: Some(data) };
     let mut buf = Vec::new();
@@ -310,11 +329,9 @@ async fn send_ws_response(socket: &mut WebSocket, data: RespData) -> bool {
     true
 }
 
-/// SDK Configuration Builder
 fn build_sdk_config(app_cfg: &crate::config::AppConfig, sess_cfg: &SessionConfig) -> SdkConfig {
     let default_voice =
         std::env::var("TTS_DEFAULT_VOICE_ID").unwrap_or_else(|_| "omnivoice:female".to_string());
-
     SdkConfig {
         stt_gateway_url: app_cfg.stt_gateway_url.clone(),
         dialog_service_url: app_cfg.dialog_service_url.clone(),
@@ -345,7 +362,6 @@ fn build_sdk_config(app_cfg: &crate::config::AppConfig, sess_cfg: &SessionConfig
     }
 }
 
-/// AI Orchestrator Task Spawner
 fn spawn_orchestrator(
     orchestrator: PipelineOrchestrator,
     ctx: &SessionContext,
@@ -378,7 +394,6 @@ fn spawn_orchestrator(
     });
 }
 
-/// Call Started Publisher
 async fn publish_call_started(state: &Arc<AppState>, ctx: &SessionContext) {
     let call_started = sentiric_contracts::sentiric::event::v1::CallStartedEvent {
         event_type: "call.started".to_string(),
@@ -388,7 +403,7 @@ async fn publish_call_started(state: &Arc<AppState>, ctx: &SessionContext) {
         to_uri: "ai-pipeline".to_string(),
         timestamp: Some(prost_types::Timestamp {
             seconds: chrono::Utc::now().timestamp(),
-            nanos: chrono::Utc::now().timestamp_subsec_nanos() as i32,
+            nanos: 0,
         }),
         dialplan_resolution: None,
         media_info: Some(sentiric_contracts::sentiric::event::v1::MediaInfo {
@@ -405,7 +420,6 @@ async fn publish_call_started(state: &Arc<AppState>, ctx: &SessionContext) {
     }
 }
 
-/// Call Ended Publisher
 async fn publish_call_ended(state: &Arc<AppState>, ctx: &SessionContext) {
     let call_ended = sentiric_contracts::sentiric::event::v1::CallEndedEvent {
         event_type: "call.ended".to_string(),
@@ -413,7 +427,7 @@ async fn publish_call_ended(state: &Arc<AppState>, ctx: &SessionContext) {
         call_id: ctx.session_id.clone(),
         timestamp: Some(prost_types::Timestamp {
             seconds: chrono::Utc::now().timestamp(),
-            nanos: chrono::Utc::now().timestamp_subsec_nanos() as i32,
+            nanos: 0,
         }),
         reason: "client_disconnected".to_string(),
     };
